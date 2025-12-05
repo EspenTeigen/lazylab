@@ -1,0 +1,41 @@
+[
+  {
+    "id": 1001,
+    "web_url": "https://gitlab.com/groups/acme-corp",
+    "name": "Acme Corp",
+    "path": "acme-corp",
+    "description": "Acme Corporation projects",
+    "visibility": "private",
+    "full_name": "Acme Corp",
+    "full_path": "acme-corp",
+    "created_at": "2023-01-15T10:00:00.000Z",
+    "parent_id": null,
+    "avatar_url": null
+  },
+  {
+    "id": 1002,
+    "web_url": "https://gitlab.com/groups/acme-corp/backend",
+    "name": "Backend",
+    "path": "backend",
+    "description": "Backend services",
+    "visibility": "private",
+    "full_name": "Acme Corp / Backend",
+    "full_path": "acme-corp/backend",
+    "created_at": "2023-02-01T09:30:00.000Z",
+    "parent_id": 1001,
+    "avatar_url": null
+  },
+  {
+    "id": 1003,
+    "web_url": "https://gitlab.com/groups/acme-corp/frontend",
+    "name": "Frontend",
+    "path": "frontend",
+    "description": "Frontend applications",
+    "visibility": "private",
+    "full_name": "Acme Corp / Frontend",
+    "full_path": "acme-corp/frontend",
+    "created_at": "2023-02-01T09:35:00.000Z",
+    "parent_id": 1001,
+    "avatar_url": null
+  }
+]

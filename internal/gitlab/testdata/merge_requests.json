@@ -1,0 +1,110 @@
+[
+  {
+    "id": 300001,
+    "iid": 42,
+    "project_id": 2001,
+    "title": "Add rate limiting to API endpoints",
+    "description": "Implements rate limiting using token bucket algorithm.\n\n## Changes\n- Added rate limiter middleware\n- Configuration via environment variables\n- Unit tests for limiter logic",
+    "state": "opened",
+    "created_at": "2025-12-04T14:00:00.000Z",
+    "updated_at": "2025-12-05T09:30:00.000Z",
+    "target_branch": "main",
+    "source_branch": "feature/rate-limiting",
+    "user_notes_count": 3,
+    "upvotes": 2,
+    "downvotes": 0,
+    "author": {
+      "id": 101,
+      "username": "jdoe",
+      "name": "Jane Doe",
+      "state": "active",
+      "avatar_url": "https://gitlab.com/uploads/-/system/user/avatar/101/avatar.png",
+      "web_url": "https://gitlab.com/jdoe"
+    },
+    "assignees": [
+      {
+        "id": 102,
+        "username": "bsmith",
+        "name": "Bob Smith",
+        "state": "active",
+        "avatar_url": "https://gitlab.com/uploads/-/system/user/avatar/102/avatar.png",
+        "web_url": "https://gitlab.com/bsmith"
+      }
+    ],
+    "reviewers": [
+      {
+        "id": 103,
+        "username": "alee",
+        "name": "Alice Lee",
+        "state": "active",
+        "avatar_url": "https://gitlab.com/uploads/-/system/user/avatar/103/avatar.png",
+        "web_url": "https://gitlab.com/alee"
+      }
+    ],
+    "labels": ["enhancement", "backend", "needs-review"],
+    "draft": false,
+    "web_url": "https://gitlab.com/acme-corp/backend/api-gateway/-/merge_requests/42",
+    "merge_status": "can_be_merged",
+    "has_conflicts": false
+  },
+  {
+    "id": 300002,
+    "iid": 41,
+    "project_id": 2001,
+    "title": "Fix memory leak in connection pool",
+    "description": "Fixes issue where connections weren't being properly released.",
+    "state": "opened",
+    "created_at": "2025-12-03T16:00:00.000Z",
+    "updated_at": "2025-12-05T08:00:00.000Z",
+    "target_branch": "main",
+    "source_branch": "fix/memory-leak",
+    "user_notes_count": 5,
+    "upvotes": 4,
+    "downvotes": 0,
+    "author": {
+      "id": 102,
+      "username": "bsmith",
+      "name": "Bob Smith",
+      "state": "active",
+      "avatar_url": "https://gitlab.com/uploads/-/system/user/avatar/102/avatar.png",
+      "web_url": "https://gitlab.com/bsmith"
+    },
+    "assignees": [],
+    "reviewers": [],
+    "labels": ["bug", "critical", "backend"],
+    "draft": false,
+    "web_url": "https://gitlab.com/acme-corp/backend/api-gateway/-/merge_requests/41",
+    "merge_status": "checking",
+    "has_conflicts": false
+  },
+  {
+    "id": 300003,
+    "iid": 40,
+    "project_id": 2001,
+    "title": "Draft: Implement OAuth2 provider",
+    "description": "WIP: Adding OAuth2 provider capabilities",
+    "state": "opened",
+    "created_at": "2025-12-01T10:00:00.000Z",
+    "updated_at": "2025-12-02T15:00:00.000Z",
+    "target_branch": "main",
+    "source_branch": "feature/oauth2-provider",
+    "user_notes_count": 1,
+    "upvotes": 0,
+    "downvotes": 0,
+    "author": {
+      "id": 101,
+      "username": "jdoe",
+      "name": "Jane Doe",
+      "state": "active",
+      "avatar_url": "https://gitlab.com/uploads/-/system/user/avatar/101/avatar.png",
+      "web_url": "https://gitlab.com/jdoe"
+    },
+    "assignees": [],
+    "reviewers": [],
+    "labels": ["enhancement", "wip"],
+    "draft": true,
+    "web_url": "https://gitlab.com/acme-corp/backend/api-gateway/-/merge_requests/40",
+    "merge_status": "cannot_be_merged",
+    "has_conflicts": true
+  }
+]

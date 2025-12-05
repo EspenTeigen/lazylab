@@ -1,0 +1,71 @@
+[
+  {
+    "name": "main",
+    "commit": {
+      "id": "a1b2c3d4e5f6789012345678901234567890abcd",
+      "short_id": "a1b2c3d4",
+      "title": "Merge branch 'feature/rate-limiting' into 'main'",
+      "message": "Merge branch 'feature/rate-limiting' into 'main'\n\nAdd rate limiting to API endpoints\n\nSee merge request acme-corp/backend/api-gateway!42",
+      "author_name": "Jane Doe",
+      "author_email": "jdoe@example.com",
+      "authored_date": "2025-12-05T10:00:00.000Z",
+      "committer_name": "GitLab",
+      "committer_email": "noreply@gitlab.com",
+      "committed_date": "2025-12-05T10:00:00.000Z",
+      "web_url": "https://gitlab.com/acme-corp/backend/api-gateway/-/commit/a1b2c3d4e5f6789012345678901234567890abcd"
+    },
+    "merged": false,
+    "protected": true,
+    "developers_can_push": false,
+    "developers_can_merge": false,
+    "can_push": false,
+    "default": true,
+    "web_url": "https://gitlab.com/acme-corp/backend/api-gateway/-/tree/main"
+  },
+  {
+    "name": "feature/auth-improvements",
+    "commit": {
+      "id": "b2c3d4e5f6789012345678901234567890abcde",
+      "short_id": "b2c3d4e5",
+      "title": "Add JWT token refresh endpoint",
+      "message": "Add JWT token refresh endpoint\n\n- Implements /auth/refresh\n- Added tests",
+      "author_name": "Bob Smith",
+      "author_email": "bsmith@example.com",
+      "authored_date": "2025-12-05T11:30:00.000Z",
+      "committer_name": "Bob Smith",
+      "committer_email": "bsmith@example.com",
+      "committed_date": "2025-12-05T11:30:00.000Z",
+      "web_url": "https://gitlab.com/acme-corp/backend/api-gateway/-/commit/b2c3d4e5f6789012345678901234567890abcde"
+    },
+    "merged": false,
+    "protected": false,
+    "developers_can_push": true,
+    "developers_can_merge": true,
+    "can_push": true,
+    "default": false,
+    "web_url": "https://gitlab.com/acme-corp/backend/api-gateway/-/tree/feature/auth-improvements"
+  },
+  {
+    "name": "fix/memory-leak",
+    "commit": {
+      "id": "c3d4e5f6789012345678901234567890abcdef",
+      "short_id": "c3d4e5f6",
+      "title": "Fix connection pool memory leak",
+      "message": "Fix connection pool memory leak\n\nConnections were not being properly released back to the pool.",
+      "author_name": "Bob Smith",
+      "author_email": "bsmith@example.com",
+      "authored_date": "2025-12-05T09:00:00.000Z",
+      "committer_name": "Bob Smith",
+      "committer_email": "bsmith@example.com",
+      "committed_date": "2025-12-05T09:00:00.000Z",
+      "web_url": "https://gitlab.com/acme-corp/backend/api-gateway/-/commit/c3d4e5f6789012345678901234567890abcdef"
+    },
+    "merged": false,
+    "protected": false,
+    "developers_can_push": true,
+    "developers_can_merge": true,
+    "can_push": true,
+    "default": false,
+    "web_url": "https://gitlab.com/acme-corp/backend/api-gateway/-/tree/fix/memory-leak"
+  }
+]
