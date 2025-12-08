@@ -1,4 +1,4 @@
-module github.com/espen/lazylab
+module github.com/EspenTeigen/lazylab
 
 go 1.24.0
 

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/espen/lazylab/internal/config"
+	"github.com/EspenTeigen/lazylab/internal/config"
 )
 
 // Client is a GitLab API client

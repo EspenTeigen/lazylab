@@ -5,8 +5,8 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/espen/lazylab/internal/keymap"
-	"github.com/espen/lazylab/internal/ui/styles"
+	"github.com/EspenTeigen/lazylab/internal/keymap"
+	"github.com/EspenTeigen/lazylab/internal/ui/styles"
 )
 
 // Item represents a list item with ID and display text

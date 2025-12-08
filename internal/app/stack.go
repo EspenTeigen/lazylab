@@ -1,6 +1,6 @@
 package app
 
-import "github.com/espen/lazylab/internal/ui/views"
+import "github.com/EspenTeigen/lazylab/internal/ui/views"
 
 // ViewStack manages the navigation history
 type ViewStack struct {

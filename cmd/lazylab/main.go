@@ -5,7 +5,7 @@ import (
 	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/espen/lazylab/internal/app"
+	"github.com/EspenTeigen/lazylab/internal/app"
 )
 
 func main() {

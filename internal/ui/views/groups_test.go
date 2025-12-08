@@ -3,7 +3,7 @@ package views
 import (
 	"testing"
 
-	"github.com/espen/lazylab/internal/gitlab"
+	"github.com/EspenTeigen/lazylab/internal/gitlab"
 )
 
 func TestGroupItem(t *testing.T) {

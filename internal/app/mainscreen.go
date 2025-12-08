@@ -20,11 +20,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/espen/lazylab/internal/config"
-	"github.com/espen/lazylab/internal/gitlab"
-	"github.com/espen/lazylab/internal/keymap"
-	"github.com/espen/lazylab/internal/ui/components"
-	"github.com/espen/lazylab/internal/ui/styles"
+	"github.com/EspenTeigen/lazylab/internal/config"
+	"github.com/EspenTeigen/lazylab/internal/gitlab"
+	"github.com/EspenTeigen/lazylab/internal/keymap"
+	"github.com/EspenTeigen/lazylab/internal/ui/components"
+	"github.com/EspenTeigen/lazylab/internal/ui/styles"
 )
 
 // copyToClipboard copies text to the system clipboard

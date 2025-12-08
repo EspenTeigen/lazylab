@@ -7,8 +7,8 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/espen/lazylab/internal/config"
-	"github.com/espen/lazylab/internal/ui/styles"
+	"github.com/EspenTeigen/lazylab/internal/config"
+	"github.com/EspenTeigen/lazylab/internal/ui/styles"
 )
 
 // LoginField identifies which input field is focused

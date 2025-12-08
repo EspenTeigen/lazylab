@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/espen/lazylab/internal/gitlab"
+	"github.com/EspenTeigen/lazylab/internal/gitlab"
 )
 
 func TestRebuildNavTree(t *testing.T) {

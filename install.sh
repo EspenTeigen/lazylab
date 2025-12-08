@@ -2,7 +2,7 @@
 set -e
 
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
-REPO="espen/lazylab"
+REPO="EspenTeigen/lazylab"
 
 # Colors
 RED='\033[0;31m'

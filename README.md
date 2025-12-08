@@ -9,10 +9,11 @@ A terminal UI for GitLab, inspired by [lazygit](https://github.com/jesseduffield
 ## Features
 
 - Browse groups and projects in a tree view
-- View repository files with syntax highlighting
+- View repository files
 - View merge requests and pipelines
+- **Live-streaming pipeline job logs** with auto-refresh
+- Auto-refreshing pipeline status
 - Switch branches
-- View pipeline job logs
 - Rendered README preview (markdown)
 - Works with GitLab.com and self-hosted instances
 
@@ -21,29 +22,29 @@ A terminal UI for GitLab, inspired by [lazygit](https://github.com/jesseduffield
 ### Quick install (recommended)
 
 ```bash
-curl -sL https://raw.githubusercontent.com/espen/lazylab/main/install.sh | bash
+curl -sL https://raw.githubusercontent.com/EspenTeigen/lazylab/main/install.sh | bash
 ```
 
 Or with a custom install directory:
 
 ```bash
-INSTALL_DIR=/usr/local/bin curl -sL https://raw.githubusercontent.com/espen/lazylab/main/install.sh | bash
+INSTALL_DIR=/usr/local/bin curl -sL https://raw.githubusercontent.com/EspenTeigen/lazylab/main/install.sh | bash
 ```
 
 ### From releases
 
-Download the latest binary from the [releases page](https://github.com/espen/lazylab/releases).
+Download the latest binary from the [releases page](https://github.com/EspenTeigen/lazylab/releases).
 
 ### Using go install
 
 ```bash
-go install github.com/espen/lazylab/cmd/lazylab@latest
+go install github.com/EspenTeigen/lazylab/cmd/lazylab@latest
 ```
 
 ### Build and install locally
 
 ```bash
-git clone https://github.com/espen/lazylab.git
+git clone https://github.com/EspenTeigen/lazylab.git
 cd lazylab
 make install
 ```
@@ -93,11 +94,14 @@ If you use [glab](https://gitlab.com/gitlab-org/cli), lazylab will automatically
 | Key | Action |
 |-----|--------|
 | `j/k` | Navigate up/down |
-| `h/l` | Navigate left/right, switch tabs |
+| `h/l` | Switch tabs |
 | `Enter` | Select / expand |
 | `Esc` | Go back / close popup |
+| `g/G` | Go to top/bottom |
+| `C-d/C-u` | Page down/up |
 | `b` | Switch branch (in files view) |
-| `1-4` | Focus panel |
+| `o` | Open in browser |
+| `r` | Refresh / retry on error |
 | `q` | Quit |
 
 ### Pipeline job log popup
@@ -105,7 +109,8 @@ If you use [glab](https://gitlab.com/gitlab-org/cli), lazylab will automatically
 | Key | Action |
 |-----|--------|
 | `j/k` | Switch between jobs |
-| `h/l` | Scroll log |
+| `C-d/C-u` | Scroll log |
+| `g/G` | Go to top/bottom of log |
 | `y` | Copy log to clipboard |
 | `Esc` | Close |
 

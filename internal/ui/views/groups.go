@@ -6,9 +6,9 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/espen/lazylab/internal/gitlab"
-	"github.com/espen/lazylab/internal/keymap"
-	"github.com/espen/lazylab/internal/ui/components"
+	"github.com/EspenTeigen/lazylab/internal/gitlab"
+	"github.com/EspenTeigen/lazylab/internal/keymap"
+	"github.com/EspenTeigen/lazylab/internal/ui/components"
 )
 
 // GroupItem wraps gitlab.Group to implement list.Item

@@ -4,7 +4,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/espen/lazylab/internal/ui/styles"
+	"github.com/EspenTeigen/lazylab/internal/ui/styles"
 )
 
 // truncateToWidth truncates a string to fit within maxWidth visual characters
