@@ -273,9 +273,8 @@ type MainScreen struct {
 	detailViewport  viewport.Model
 	jobLogViewport  viewport.Model
 	fileViewport    viewport.Model
-	readmeReady     bool
-	detailReady     bool
-	jobLogReady     bool
+	readmeReady   bool
+	jobLogReady   bool
 	fileViewReady   bool
 
 	// Job selection for pipelines
@@ -1084,7 +1083,7 @@ func (m *MainScreen) handleContentNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keymap.Down):
 		// If viewing file, scroll down
 		if m.viewingFile {
-			m.fileViewport.LineDown(1)
+			m.fileViewport.ScrollDown(1)
 			return m, nil
 		}
 		maxItems := m.getContentCount()
@@ -1099,7 +1098,7 @@ func (m *MainScreen) handleContentNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keymap.Up):
 		// If viewing file, scroll up
 		if m.viewingFile {
-			m.fileViewport.LineUp(1)
+			m.fileViewport.ScrollUp(1)
 			return m, nil
 		}
 		if m.selectedContent > 0 {
@@ -1116,9 +1115,9 @@ func (m *MainScreen) handleContentNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.viewingFile {
 		switch msg.String() {
 		case "ctrl+d":
-			m.fileViewport.HalfViewDown()
+			m.fileViewport.HalfPageDown()
 		case "ctrl+u":
-			m.fileViewport.HalfViewUp()
+			m.fileViewport.HalfPageUp()
 		case "g":
 			m.fileViewport.GotoTop()
 		case "G":
@@ -1151,15 +1150,15 @@ func (m *MainScreen) handleReadmeNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keymap.Right):
 		m.focusedPanel = PanelDetail
 	case key.Matches(msg, m.keymap.Up):
-		m.readmeViewport.LineUp(1)
+		m.readmeViewport.ScrollUp(1)
 	case key.Matches(msg, m.keymap.Down):
-		m.readmeViewport.LineDown(1)
+		m.readmeViewport.ScrollDown(1)
 	}
 	switch msg.String() {
 	case "ctrl+d":
-		m.readmeViewport.HalfViewDown()
+		m.readmeViewport.HalfPageDown()
 	case "ctrl+u":
-		m.readmeViewport.HalfViewUp()
+		m.readmeViewport.HalfPageUp()
 	}
 	return m, nil
 }

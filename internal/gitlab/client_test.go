@@ -56,7 +56,7 @@ func TestClient_ListGroups(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(groups)
+		_ = json.NewEncoder(w).Encode(groups)
 	}))
 	defer server.Close()
 
@@ -85,7 +85,7 @@ func TestClient_ListProjects(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(projects)
+		_ = json.NewEncoder(w).Encode(projects)
 	}))
 	defer server.Close()
 
@@ -109,7 +109,7 @@ func TestClient_GetProject(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(project)
+		_ = json.NewEncoder(w).Encode(project)
 	}))
 	defer server.Close()
 
@@ -257,7 +257,7 @@ func TestClient_SearchProjects(t *testing.T) {
 func TestClient_ErrorResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`{"message": "Not found"}`))
+		_, _ = w.Write([]byte(`{"message": "Not found"}`))
 	}))
 	defer server.Close()
 
@@ -277,7 +277,7 @@ func TestClient_NoToken(t *testing.T) {
 			t.Error("expected no PRIVATE-TOKEN header for public client")
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte("[]"))
+		_, _ = w.Write([]byte("[]"))
 	}))
 	defer server.Close()
 
