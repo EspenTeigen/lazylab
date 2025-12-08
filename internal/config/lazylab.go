@@ -9,8 +9,8 @@ import (
 
 // LazyLabConfig represents the lazylab configuration
 type LazyLabConfig struct {
-	DefaultHost string                    `yaml:"default_host,omitempty"`
-	Hosts       map[string]LazyLabHost    `yaml:"hosts,omitempty"`
+	DefaultHost string                 `yaml:"default_host,omitempty"`
+	Hosts       map[string]LazyLabHost `yaml:"hosts,omitempty"`
 }
 
 // LazyLabHost represents a GitLab host configuration

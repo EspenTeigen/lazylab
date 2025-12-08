@@ -4,16 +4,16 @@ import "time"
 
 // API configuration
 const (
-	DefaultPerPage   = 50
-	DefaultTimeout   = 30 * time.Second
-	MaxRetries       = 3
-	InitialBackoff   = 500 * time.Millisecond
-	MaxBackoff       = 5 * time.Second
-	DefaultHost      = "gitlab.com"
-	DefaultBranch    = "main"
-	DefaultAPIPath   = "/api/v4"
-	RateLimitStatus  = 429
-	ServerErrorMin   = 500
+	DefaultPerPage  = 50
+	DefaultTimeout  = 30 * time.Second
+	MaxRetries      = 3
+	InitialBackoff  = 500 * time.Millisecond
+	MaxBackoff      = 5 * time.Second
+	DefaultHost     = "gitlab.com"
+	DefaultBranch   = "main"
+	DefaultAPIPath  = "/api/v4"
+	RateLimitStatus = 429
+	ServerErrorMin  = 500
 )
 
 // Environment variable names
@@ -45,8 +45,14 @@ const (
 	SearchMinQueryLength = 2
 )
 
+// Auto-refresh configuration
+const (
+	PipelineRefreshInterval = 10 * time.Second
+	JobLogRefreshInterval   = 3 * time.Second
+)
+
 // UI element sizes
 const (
-	BorderSize   = 2
+	BorderSize      = 2
 	StatusBarHeight = 1
 )

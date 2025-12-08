@@ -12,7 +12,7 @@ type mockView struct {
 	title string
 }
 
-func (m mockView) Init() tea.Cmd                        { return nil }
+func (m mockView) Init() tea.Cmd                       { return nil }
 func (m mockView) Update(tea.Msg) (tea.Model, tea.Cmd) { return m, nil }
 func (m mockView) View() string                        { return m.title }
 func (m mockView) Title() string                       { return m.title }

@@ -7,7 +7,9 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/formatters"
@@ -131,6 +133,63 @@ func renderMarkdown(content string) string {
 	return strings.TrimSpace(rendered)
 }
 
+// isBinaryContent checks if content appears to be binary
+func isBinaryContent(content string) bool {
+	// Check first 8KB for null bytes (strong indicator of binary)
+	checkLen := 8192
+	if len(content) < checkLen {
+		checkLen = len(content)
+	}
+	for i := 0; i < checkLen; i++ {
+		if content[i] == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// isBinaryExtension checks if file extension indicates binary
+func isBinaryExtension(path string) bool {
+	binaryExts := map[string]bool{
+		".exe": true, ".dll": true, ".so": true, ".dylib": true, ".a": true, ".o": true,
+		".bin": true, ".dat": true, ".db": true, ".sqlite": true,
+		".zip": true, ".tar": true, ".gz": true, ".bz2": true, ".xz": true, ".7z": true, ".rar": true,
+		".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".bmp": true, ".ico": true, ".webp": true,
+		".pdf": true, ".doc": true, ".docx": true, ".xls": true, ".xlsx": true, ".ppt": true, ".pptx": true,
+		".mp3": true, ".mp4": true, ".avi": true, ".mkv": true, ".mov": true, ".wav": true, ".flac": true,
+		".ttf": true, ".otf": true, ".woff": true, ".woff2": true, ".eot": true,
+		".pyc": true, ".pyo": true, ".class": true, ".jar": true, ".war": true,
+		".wasm": true, ".node": true,
+	}
+	path = strings.ToLower(path)
+	for ext := range binaryExts {
+		if strings.HasSuffix(path, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+// hardTruncate cuts a string to fit within maxWidth visual characters
+func hardTruncate(s string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	width := lipgloss.Width(s)
+	if width <= maxWidth {
+		return s
+	}
+	// Cut rune by rune until we fit
+	runes := []rune(s)
+	for len(runes) > 0 {
+		runes = runes[:len(runes)-1]
+		if lipgloss.Width(string(runes)) <= maxWidth {
+			return string(runes)
+		}
+	}
+	return ""
+}
+
 // wrapText wraps all lines in text to fit within maxWidth
 func wrapText(text string, maxWidth int) string {
 	if maxWidth <= 0 {
@@ -141,38 +200,31 @@ func wrapText(text string, maxWidth int) string {
 	var result []string
 
 	for _, line := range lines {
-		if len(line) <= maxWidth {
+		if lipgloss.Width(line) <= maxWidth {
 			result = append(result, line)
 			continue
 		}
 
-		// Wrap long line
-		remaining := line
-		for len(remaining) > maxWidth {
-			// Find break point - look for space to break at
-			breakAt := maxWidth
-			minBreak := maxWidth / 2
-			if minBreak < 0 {
-				minBreak = 0
-			}
-			for i := maxWidth - 1; i >= minBreak && i < len(remaining); i-- {
-				if remaining[i] == ' ' {
-					breakAt = i
-					break
+		// Wrap long line using rune-based approach for proper width handling
+		var currentLine []rune
+		currentWidth := 0
+
+		for _, r := range line {
+			runeWidth := lipgloss.Width(string(r))
+			if currentWidth+runeWidth > maxWidth {
+				// Line would exceed maxWidth, wrap here
+				if len(currentLine) > 0 {
+					result = append(result, string(currentLine))
 				}
-			}
-			// Safety check
-			if breakAt > len(remaining) {
-				breakAt = len(remaining)
-			}
-			result = append(result, remaining[:breakAt])
-			remaining = remaining[breakAt:]
-			if len(remaining) > 0 && remaining[0] == ' ' {
-				remaining = remaining[1:]
+				currentLine = []rune{r}
+				currentWidth = runeWidth
+			} else {
+				currentLine = append(currentLine, r)
+				currentWidth += runeWidth
 			}
 		}
-		if len(remaining) > 0 {
-			result = append(result, remaining)
+		if len(currentLine) > 0 {
+			result = append(result, string(currentLine))
 		}
 	}
 
@@ -225,8 +277,8 @@ type MainScreen struct {
 	groupProjects   map[int][]gitlab.Project // group ID -> projects (cache)
 
 	// Raw data
-	groups  []gitlab.Group
-	files   []gitlab.TreeEntry
+	groups        []gitlab.Group
+	files         []gitlab.TreeEntry
 	mergeRequests []gitlab.MergeRequest
 	pipelines     []gitlab.Pipeline
 	branches      []gitlab.Branch
@@ -242,9 +294,9 @@ type MainScreen struct {
 	// File browser state
 	currentPath     []string
 	fileContent     string
-	readmeContent         string
-	readmeRendered        string
-	viewingFile           bool
+	readmeContent   string
+	readmeRendered  string
+	viewingFile     bool
 	viewingFilePath string
 
 	// Selection indices
@@ -269,13 +321,13 @@ type MainScreen struct {
 	errMsg     string
 
 	// Viewports for scrolling
-	readmeViewport  viewport.Model
-	detailViewport  viewport.Model
-	jobLogViewport  viewport.Model
-	fileViewport    viewport.Model
-	readmeReady   bool
-	jobLogReady   bool
-	fileViewReady   bool
+	readmeViewport viewport.Model
+	detailViewport viewport.Model
+	jobLogViewport viewport.Model
+	fileViewport   viewport.Model
+	readmeReady    bool
+	jobLogReady    bool
+	fileViewReady  bool
 
 	// Job selection for pipelines
 	selectedJobIdx int
@@ -287,9 +339,9 @@ type MainScreen struct {
 	showJobLogPopup bool
 
 	// Branch selector popup
-	showBranchPopup  bool
+	showBranchPopup   bool
 	selectedBranchIdx int
-	currentBranch    string
+	currentBranch     string
 
 	// Status message (for clipboard feedback etc)
 	statusMsg string
@@ -649,6 +701,65 @@ type pipelineJobsLoadedMsg struct {
 	jobs       []gitlab.Job
 }
 
+// pipelineTickMsg triggers auto-refresh of pipelines
+type pipelineTickMsg time.Time
+
+// pipelinesRefreshedMsg is like pipelinesLoadedMsg but preserves selection
+type pipelinesRefreshedMsg struct{ pipelines []gitlab.Pipeline }
+
+// pipelineTickCmd returns a command that sends a tick after the configured interval
+func pipelineTickCmd() tea.Cmd {
+	return tea.Tick(config.PipelineRefreshInterval, func(t time.Time) tea.Msg {
+		return pipelineTickMsg(t)
+	})
+}
+
+// refreshPipelines fetches pipelines without resetting selection
+func (m *MainScreen) refreshPipelines() tea.Cmd {
+	if m.selectedProject == nil {
+		return nil
+	}
+	projectID := fmt.Sprintf("%d", m.selectedProject.ID)
+	return func() tea.Msg {
+		pipelines, err := m.client.ListPipelines(projectID)
+		if err != nil {
+			// Silently ignore errors on auto-refresh
+			return nil
+		}
+		return pipelinesRefreshedMsg{pipelines: pipelines}
+	}
+}
+
+// jobLogTickMsg triggers auto-refresh of job log
+type jobLogTickMsg time.Time
+
+// jobLogRefreshedMsg carries refreshed log content
+type jobLogRefreshedMsg struct{ log string }
+
+// jobLogTickCmd returns a command that sends a tick after the configured interval
+func jobLogTickCmd() tea.Cmd {
+	return tea.Tick(config.JobLogRefreshInterval, func(t time.Time) tea.Msg {
+		return jobLogTickMsg(t)
+	})
+}
+
+// refreshJobLog fetches job log without resetting viewport position
+func (m *MainScreen) refreshJobLog() tea.Cmd {
+	if m.selectedProject == nil || m.selectedJobIdx < 0 || m.selectedJobIdx >= len(m.jobs) {
+		return nil
+	}
+	job := m.jobs[m.selectedJobIdx]
+	projectID := fmt.Sprintf("%d", m.selectedProject.ID)
+	return func() tea.Msg {
+		log, err := m.client.GetJobLog(projectID, job.ID)
+		if err != nil {
+			// Silently ignore errors on auto-refresh
+			return nil
+		}
+		return jobLogRefreshedMsg{log: log}
+	}
+}
+
 // Update handles messages
 func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -732,7 +843,12 @@ func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case fileContentMsg:
-		m.fileContent = msg.content
+		// Check for binary content
+		if isBinaryExtension(msg.path) || isBinaryContent(msg.content) {
+			m.fileContent = "[Binary file - cannot display]"
+		} else {
+			m.fileContent = msg.content
+		}
 		m.viewingFile = true
 		m.viewingFilePath = msg.path
 		m.fileViewReady = false // Reset to reinitialize viewport with new content
@@ -760,7 +876,49 @@ func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		for _, p := range m.pipelines {
 			cmds = append(cmds, m.loadPipelineJobsForList(p.ID))
 		}
+		// Start auto-refresh ticker
+		cmds = append(cmds, pipelineTickCmd())
 		return m, tea.Batch(cmds...)
+
+	case pipelinesRefreshedMsg:
+		// Preserve selection when auto-refreshing
+		selectedPipelineID := 0
+		if m.selectedContent < len(m.pipelines) {
+			selectedPipelineID = m.pipelines[m.selectedContent].ID
+		}
+		m.pipelines = msg.pipelines
+		// Restore selection by finding the same pipeline ID
+		if selectedPipelineID != 0 {
+			for i, p := range m.pipelines {
+				if p.ID == selectedPipelineID {
+					m.selectedContent = i
+					break
+				}
+			}
+		}
+		// Clamp selection to valid range
+		if m.selectedContent >= len(m.pipelines) && len(m.pipelines) > 0 {
+			m.selectedContent = len(m.pipelines) - 1
+		}
+		// Refresh jobs for pipelines
+		var cmds []tea.Cmd
+		for _, p := range m.pipelines {
+			cmds = append(cmds, m.loadPipelineJobsForList(p.ID))
+		}
+		// Continue ticker
+		cmds = append(cmds, pipelineTickCmd())
+		return m, tea.Batch(cmds...)
+
+	case pipelineTickMsg:
+		// Only refresh if we're viewing pipelines tab and have a project
+		if m.contentTab == TabPipelines && m.selectedProject != nil && !m.loading {
+			return m, m.refreshPipelines()
+		}
+		// Keep ticker running even if we're not on pipelines tab
+		if m.selectedProject != nil {
+			return m, pipelineTickCmd()
+		}
+		return m, nil
 
 	case pipelineJobsLoadedMsg:
 		if m.pipelineJobs == nil {
@@ -809,6 +967,42 @@ func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.jobLogReady = false
 		m.loading = false
 		m.lastError = ""
+		// Start auto-refresh for live log viewing
+		return m, jobLogTickCmd()
+
+	case jobLogTickMsg:
+		// Only refresh if job popup is still open
+		if m.showJobLogPopup && m.selectedJobIdx >= 0 {
+			return m, m.refreshJobLog()
+		}
+		return m, nil
+
+	case jobLogRefreshedMsg:
+		if msg.log != "" && m.showJobLogPopup {
+			// Save current scroll position
+			currentLine := m.jobLogViewport.YOffset
+			wasAtBottom := m.jobLogViewport.ScrollPercent() >= 0.99
+
+			// Update log content
+			m.jobLog = msg.log
+
+			// Update viewport content directly without recreating it
+			cleanLog := msg.log
+			cleanLog = strings.ReplaceAll(cleanLog, "\t", "    ")
+			cleanLog = strings.ReplaceAll(cleanLog, "\r", "")
+			wrappedLog := wrapText(cleanLog, m.jobLogViewport.Width)
+			m.jobLogViewport.SetContent(wrappedLog)
+
+			// Restore scroll position
+			if wasAtBottom {
+				m.jobLogViewport.GotoBottom()
+			} else {
+				m.jobLogViewport.SetYOffset(currentLine)
+			}
+
+			// Schedule next tick
+			return m, jobLogTickCmd()
+		}
 		return m, nil
 
 	case tea.KeyMsg:
@@ -1476,7 +1670,7 @@ func (m *MainScreen) renderListSection(width, height int) string {
 
 	// Path breadcrumb for files
 	if m.contentTab == TabFiles && len(m.currentPath) > 0 {
-		content.WriteString(styles.DimmedText.Render("/" + strings.Join(m.currentPath, "/")) + "\n")
+		content.WriteString(styles.DimmedText.Render("/"+strings.Join(m.currentPath, "/")) + "\n")
 	}
 	content.WriteString("\n")
 
@@ -1577,10 +1771,16 @@ func (m *MainScreen) renderListSection(width, height int) string {
 				// Build job stages icons
 				stagesStr := ""
 				if jobs, ok := m.pipelineJobs[p.ID]; ok && len(jobs) > 0 {
+					// Sort jobs by ID to get correct stage order (earlier stages have lower IDs)
+					sortedJobs := make([]gitlab.Job, len(jobs))
+					copy(sortedJobs, jobs)
+					sort.Slice(sortedJobs, func(i, j int) bool {
+						return sortedJobs[i].ID < sortedJobs[j].ID
+					})
 					// Group jobs by stage and get stage status
 					stageOrder := []string{}
 					stageStatus := make(map[string]string)
-					for _, job := range jobs {
+					for _, job := range sortedJobs {
 						if _, exists := stageStatus[job.Stage]; !exists {
 							stageOrder = append(stageOrder, job.Stage)
 							stageStatus[job.Stage] = job.Status
@@ -1627,7 +1827,7 @@ func (m *MainScreen) renderListSection(width, height int) string {
 
 func (m *MainScreen) renderReadmeSection(width, height int) string {
 	// Update viewport dimensions and content
-	innerWidth := width - 4  // account for borders
+	innerWidth := width - 4   // account for borders
 	innerHeight := height - 3 // account for borders and title
 
 	if !m.readmeReady {
@@ -1708,12 +1908,25 @@ func (m *MainScreen) renderJobLogPopup() string {
 	} else {
 		if !m.jobLogReady || m.jobLogViewport.Width != logInnerWidth || m.jobLogViewport.Height != logInnerHeight {
 			m.jobLogViewport = viewport.New(logInnerWidth, logInnerHeight)
-			cleanLog := stripANSI(m.jobLog)
+			// Keep ANSI colors but clean up problematic characters
+			cleanLog := m.jobLog
+			// Replace tabs with spaces (tabs mess up width calculation)
+			cleanLog = strings.ReplaceAll(cleanLog, "\t", "    ")
+			// Remove carriage returns (CI logs use these for progress updates)
+			cleanLog = strings.ReplaceAll(cleanLog, "\r", "")
 			wrappedLog := wrapText(cleanLog, logInnerWidth)
 			m.jobLogViewport.SetContent(wrappedLog)
 			m.jobLogReady = true
 		}
-		logContent.WriteString(m.jobLogViewport.View())
+		// Get viewport content and hard-truncate each line
+		viewContent := m.jobLogViewport.View()
+		lines := strings.Split(viewContent, "\n")
+		for i, line := range lines {
+			// Also replace any remaining tabs
+			line = strings.ReplaceAll(line, "\t", "    ")
+			lines[i] = hardTruncate(line, logInnerWidth)
+		}
+		logContent.WriteString(strings.Join(lines, "\n"))
 	}
 
 	// Build log title with job info
@@ -1730,26 +1943,7 @@ func (m *MainScreen) renderJobLogPopup() string {
 	logPanel := components.SimpleBorderedPanel(logTitle, logContent.String(), logWidth, popupHeight, false)
 
 	// Join panels horizontally
-	jobLines := strings.Split(jobPanel, "\n")
-	logLines := strings.Split(logPanel, "\n")
-
-	var combined strings.Builder
-	maxLines := len(jobLines)
-	if len(logLines) > maxLines {
-		maxLines = len(logLines)
-	}
-
-	for i := 0; i < maxLines; i++ {
-		jobLine := ""
-		logLine := ""
-		if i < len(jobLines) {
-			jobLine = jobLines[i]
-		}
-		if i < len(logLines) {
-			logLine = logLines[i]
-		}
-		combined.WriteString(jobLine + logLine + "\n")
-	}
+	combined := lipgloss.JoinHorizontal(lipgloss.Top, jobPanel, logPanel)
 
 	// Status bar
 	scrollInfo := ""
@@ -1759,7 +1953,8 @@ func (m *MainScreen) renderJobLogPopup() string {
 
 	statusContent := styles.StatusBarKey.Render("Esc") + styles.StatusBarDesc.Render(" close") + " │ " +
 		styles.StatusBarKey.Render("j/k") + styles.StatusBarDesc.Render(" jobs") + " │ " +
-		styles.StatusBarKey.Render("h/l") + styles.StatusBarDesc.Render(" scroll") + " │ " +
+		styles.StatusBarKey.Render("C-d/C-u") + styles.StatusBarDesc.Render(" scroll") + " │ " +
+		styles.StatusBarKey.Render("g/G") + styles.StatusBarDesc.Render(" top/bottom") + " │ " +
 		styles.StatusBarKey.Render("y") + styles.StatusBarDesc.Render(" copy") +
 		scrollInfo
 
@@ -1769,7 +1964,7 @@ func (m *MainScreen) renderJobLogPopup() string {
 
 	statusBar := styles.StatusBar.Width(m.width).Render(statusContent)
 
-	return combined.String() + statusBar
+	return combined + "\n" + statusBar
 }
 
 func (m *MainScreen) renderDetailPanel(width, height int) string {

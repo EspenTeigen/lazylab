@@ -7,6 +7,26 @@ import (
 	"github.com/espen/lazylab/internal/ui/styles"
 )
 
+// truncateToWidth truncates a string to fit within maxWidth visual characters
+func truncateToWidth(s string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	width := lipgloss.Width(s)
+	if width <= maxWidth {
+		return s
+	}
+	// Truncate rune by rune until we fit
+	runes := []rune(s)
+	for len(runes) > 0 {
+		runes = runes[:len(runes)-1]
+		if lipgloss.Width(string(runes)) <= maxWidth-1 {
+			return string(runes) + "…"
+		}
+	}
+	return ""
+}
+
 // Panel represents a bordered panel with a title
 type Panel struct {
 	Title   string
@@ -91,7 +111,7 @@ func (p *Panel) View() string {
 			// Calculate position (after "╭─")
 			runes := []rune(topBorder)
 			if len(runes) > 3 {
-				prefix := string(runes[0:2])         // "╭─"
+				prefix := string(runes[0:2])               // "╭─"
 				suffix := string(runes[2+len(p.Title)+2:]) // rest of border
 
 				// Rebuild with colored title
@@ -163,11 +183,8 @@ func SimpleBorderedPanel(title string, content string, width, height int, focuse
 		if i < len(contentLines) {
 			line = contentLines[i]
 		}
-		// Truncate if too long
-		if lipgloss.Width(line) > innerWidth {
-			// Use lipgloss to truncate properly
-			line = lipgloss.NewStyle().MaxWidth(innerWidth).Render(line)
-		}
+		// Truncate if too long - use rune-based truncation for accuracy
+		line = truncateToWidth(line, innerWidth)
 		// Pad to exact width
 		padding := innerWidth - lipgloss.Width(line)
 		if padding > 0 {
@@ -181,7 +198,7 @@ func SimpleBorderedPanel(title string, content string, width, height int, focuse
 
 	// Top border with title
 	titleText := " " + title + " "
-	titleLen := len(title) + 2
+	titleLen := lipgloss.Width(titleText)
 	leftLen := (innerWidth - titleLen) / 2
 	rightLen := innerWidth - titleLen - leftLen
 	if leftLen < 0 {

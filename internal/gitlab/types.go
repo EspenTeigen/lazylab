@@ -4,17 +4,17 @@ import "time"
 
 // Group represents a GitLab group
 type Group struct {
-	ID          int        `json:"id"`
-	WebURL      string     `json:"web_url"`
-	Name        string     `json:"name"`
-	Path        string     `json:"path"`
-	Description string     `json:"description"`
-	Visibility  string     `json:"visibility"`
-	FullName    string     `json:"full_name"`
-	FullPath    string     `json:"full_path"`
-	CreatedAt   time.Time  `json:"created_at"`
-	ParentID    *int       `json:"parent_id"`
-	AvatarURL   *string    `json:"avatar_url"`
+	ID          int       `json:"id"`
+	WebURL      string    `json:"web_url"`
+	Name        string    `json:"name"`
+	Path        string    `json:"path"`
+	Description string    `json:"description"`
+	Visibility  string    `json:"visibility"`
+	FullName    string    `json:"full_name"`
+	FullPath    string    `json:"full_path"`
+	CreatedAt   time.Time `json:"created_at"`
+	ParentID    *int      `json:"parent_id"`
+	AvatarURL   *string   `json:"avatar_url"`
 }
 
 // Namespace represents a GitLab namespace (group or user)
@@ -28,23 +28,24 @@ type Namespace struct {
 
 // Project represents a GitLab project
 type Project struct {
-	ID                int        `json:"id"`
-	Name              string     `json:"name"`
-	NameWithNamespace string     `json:"name_with_namespace"`
-	Path              string     `json:"path"`
-	PathWithNamespace string     `json:"path_with_namespace"`
-	Description       string     `json:"description"`
-	Visibility        string     `json:"visibility"`
-	CreatedAt         time.Time  `json:"created_at"`
-	DefaultBranch     string     `json:"default_branch"`
-	SSHURLToRepo      string     `json:"ssh_url_to_repo"`
-	HTTPURLToRepo     string     `json:"http_url_to_repo"`
-	WebURL            string     `json:"web_url"`
-	Topics            []string   `json:"topics"`
-	StarCount         int        `json:"star_count"`
-	ForksCount        int        `json:"forks_count"`
-	LastActivityAt    time.Time  `json:"last_activity_at"`
-	Namespace         *Namespace `json:"namespace"`
+	ID                  int        `json:"id"`
+	Name                string     `json:"name"`
+	NameWithNamespace   string     `json:"name_with_namespace"`
+	Path                string     `json:"path"`
+	PathWithNamespace   string     `json:"path_with_namespace"`
+	Description         string     `json:"description"`
+	Visibility          string     `json:"visibility"`
+	CreatedAt           time.Time  `json:"created_at"`
+	DefaultBranch       string     `json:"default_branch"`
+	SSHURLToRepo        string     `json:"ssh_url_to_repo"`
+	HTTPURLToRepo       string     `json:"http_url_to_repo"`
+	WebURL              string     `json:"web_url"`
+	Topics              []string   `json:"topics"`
+	StarCount           int        `json:"star_count"`
+	ForksCount          int        `json:"forks_count"`
+	LastActivityAt      time.Time  `json:"last_activity_at"`
+	Namespace           *Namespace `json:"namespace"`
+	MarkedForDeletionAt *string    `json:"marked_for_deletion_at"`
 }
 
 // Pipeline represents a GitLab CI/CD pipeline
@@ -136,18 +137,18 @@ type TreeEntry struct {
 
 // Job represents a CI/CD job within a pipeline
 type Job struct {
-	ID         int       `json:"id"`
-	Name       string    `json:"name"`
-	Stage      string    `json:"stage"`
-	Status     string    `json:"status"`
-	Ref        string    `json:"ref"`
-	CreatedAt  time.Time `json:"created_at"`
-	StartedAt  time.Time `json:"started_at"`
-	FinishedAt time.Time `json:"finished_at"`
-	Duration   float64   `json:"duration"`
-	WebURL     string    `json:"web_url"`
+	ID         int        `json:"id"`
+	Name       string     `json:"name"`
+	Stage      string     `json:"stage"`
+	Status     string     `json:"status"`
+	Ref        string     `json:"ref"`
+	CreatedAt  time.Time  `json:"created_at"`
+	StartedAt  *time.Time `json:"started_at"`
+	FinishedAt *time.Time `json:"finished_at"`
+	Duration   float64    `json:"duration"`
+	WebURL     string     `json:"web_url"`
 	Pipeline   struct {
-		ID  int `json:"id"`
+		ID  int    `json:"id"`
 		Ref string `json:"ref"`
 	} `json:"pipeline"`
 }

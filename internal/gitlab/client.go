@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/espen/lazylab/internal/config"
@@ -224,6 +225,20 @@ func (c *Client) ListPipelines(projectID string) ([]Pipeline, error) {
 	return pipelines, nil
 }
 
+// filterActiveProjects removes projects that are marked for deletion
+func filterActiveProjects(projects []Project) []Project {
+	result := make([]Project, 0, len(projects))
+	for _, p := range projects {
+		// GitLab renames projects to include "deletion_scheduled" but doesn't always
+		// set marked_for_deletion_at, so check both
+		markedForDeletion := p.MarkedForDeletionAt != nil && *p.MarkedForDeletionAt != ""
+		if !markedForDeletion && !strings.Contains(p.Name, "deletion_scheduled") {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
 // ListGroupProjects fetches projects from a group
 func (c *Client) ListGroupProjects(groupID string) ([]Project, error) {
 	var projects []Project
@@ -231,7 +246,7 @@ func (c *Client) ListGroupProjects(groupID string) ([]Project, error) {
 	if err := c.get(path, &projects); err != nil {
 		return nil, err
 	}
-	return projects, nil
+	return filterActiveProjects(projects), nil
 }
 
 // ListProjects fetches all accessible projects (for self-hosted instances)
@@ -241,7 +256,7 @@ func (c *Client) ListProjects() ([]Project, error) {
 	if err := c.get(path, &projects); err != nil {
 		return nil, err
 	}
-	return projects, nil
+	return filterActiveProjects(projects), nil
 }
 
 // ListGroups fetches all accessible groups
@@ -271,7 +286,7 @@ func (c *Client) SearchProjects(query string) ([]Project, error) {
 	if err := c.get(path, &projects); err != nil {
 		return nil, err
 	}
-	return projects, nil
+	return filterActiveProjects(projects), nil
 }
 
 // SearchGroups searches for groups by name

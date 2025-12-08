@@ -296,8 +296,8 @@ func TestIsRetryableStatus(t *testing.T) {
 		{200, false},
 		{400, false},
 		{404, false},
-		{429, true},  // Rate limit
-		{500, true},  // Server error
+		{429, true}, // Rate limit
+		{500, true}, // Server error
 		{502, true},
 		{503, true},
 	}
