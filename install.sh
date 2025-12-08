@@ -50,7 +50,9 @@ install_binary() {
 
     info "Installing lazylab ${VERSION} for ${PLATFORM}..."
 
-    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/lazylab_${PLATFORM}.tar.gz"
+    # Version without 'v' prefix for filename
+    VERSION_NUM="${VERSION#v}"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/lazylab_${VERSION_NUM}_${PLATFORM}.tar.gz"
     TMP_DIR=$(mktemp -d)
     trap "rm -rf $TMP_DIR" EXIT
 
