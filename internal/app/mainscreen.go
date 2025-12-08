@@ -1169,9 +1169,9 @@ func (m *MainScreen) handleDetailNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keymap.Left):
 		m.focusedPanel = PanelContent
 	case key.Matches(msg, m.keymap.Down):
-		m.detailViewport.LineDown(1)
+		m.detailViewport.ScrollDown(1)
 	case key.Matches(msg, m.keymap.Up):
-		m.detailViewport.LineUp(1)
+		m.detailViewport.ScrollUp(1)
 	}
 	return m, nil
 }
@@ -1245,13 +1245,13 @@ func (m *MainScreen) handleJobLogPopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 	case "h", "left":
-		m.jobLogViewport.LineUp(3)
+		m.jobLogViewport.ScrollUp(3)
 	case "l", "right":
-		m.jobLogViewport.LineDown(3)
+		m.jobLogViewport.ScrollDown(3)
 	case "ctrl+d":
-		m.jobLogViewport.HalfViewDown()
+		m.jobLogViewport.HalfPageDown()
 	case "ctrl+u":
-		m.jobLogViewport.HalfViewUp()
+		m.jobLogViewport.HalfPageUp()
 	case "g":
 		m.jobLogViewport.GotoTop()
 	case "G":
