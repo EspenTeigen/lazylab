@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 
@@ -9,12 +10,15 @@ import (
 )
 
 func main() {
+	setup := flag.Bool("setup", false, "Configure GitLab connection (add/change host and token)")
+	flag.Parse()
+
 	// Check for credentials and show appropriate screen
 	var screen tea.Model
-	if app.HasCredentials() {
-		screen = app.NewMainScreen()
-	} else {
+	if *setup || !app.HasCredentials() {
 		screen = app.NewLauncher()
+	} else {
+		screen = app.NewMainScreen()
 	}
 
 	// Run the TUI

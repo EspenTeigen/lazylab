@@ -63,7 +63,13 @@ make uninstall
 
 ## Authentication
 
-On first run, lazylab will prompt for your GitLab token. You can also configure it via:
+On first run, lazylab will prompt for your GitLab host and token. To reconfigure or add a new instance:
+
+```bash
+lazylab --setup
+```
+
+You can also configure it via:
 
 ### Environment variables
 
