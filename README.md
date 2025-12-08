@@ -154,6 +154,10 @@ This project is built with these excellent open source libraries:
 
 Inspired by [lazygit](https://github.com/jesseduffield/lazygit).
 
+## Disclaimer
+
+This software is provided "as is", without warranty of any kind. Use at your own risk.
+
 ## License
 
 MIT
