@@ -17,6 +17,7 @@ func NewDemoScreen() *MainScreen {
 		contentTab:     TabFiles,
 		keymap:         keymap.DefaultKeyMap(),
 		pipelineJobs:   make(map[int][]gitlab.Job),
+		isDemo:         true,
 	}
 
 	// Set up mock project
@@ -208,4 +209,98 @@ func mockBranches() []gitlab.Branch {
 		{Name: "feature/auth", Default: false, Protected: false},
 		{Name: "fix/auth-timeout", Default: false, Protected: false},
 	}
+}
+
+// MockFileContent returns mock content for demo file viewing
+var MockFileContent = map[string]string{
+	"main.go": `package main
+
+import (
+	"log"
+	"net/http"
+
+	"github.com/acme-corp/api-gateway/internal/router"
+	"github.com/acme-corp/api-gateway/internal/middleware"
+)
+
+func main() {
+	r := router.New()
+
+	// Apply middleware
+	r.Use(middleware.Logger())
+	r.Use(middleware.RateLimit(100))
+	r.Use(middleware.Auth())
+
+	// Register routes
+	r.GET("/health", healthHandler)
+	r.GET("/api/v1/*", proxyHandler)
+
+	log.Println("Starting API Gateway on :8080")
+	log.Fatal(http.ListenAndServe(":8080", r))
+}
+
+func healthHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
+}
+
+func proxyHandler(w http.ResponseWriter, r *http.Request) {
+	// Forward request to appropriate service
+	router.Forward(w, r)
+}
+`,
+	"go.mod": `module github.com/acme-corp/api-gateway
+
+go 1.21
+
+require (
+	github.com/gorilla/mux v1.8.1
+	github.com/prometheus/client_golang v1.17.0
+	go.uber.org/zap v1.26.0
+)
+`,
+	"Dockerfile": `FROM golang:1.21-alpine AS builder
+
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 go build -o api-gateway ./cmd/server
+
+FROM alpine:3.18
+RUN apk --no-cache add ca-certificates
+WORKDIR /root/
+COPY --from=builder /app/api-gateway .
+EXPOSE 8080
+CMD ["./api-gateway"]
+`,
+	".gitlab-ci.yml": `stages:
+  - test
+  - build
+  - deploy
+
+test:
+  stage: test
+  image: golang:1.21
+  script:
+    - go test -v ./...
+    - go vet ./...
+
+build:
+  stage: build
+  image: docker:24
+  services:
+    - docker:dind
+  script:
+    - docker build -t api-gateway:$CI_COMMIT_SHA .
+    - docker push $REGISTRY/api-gateway:$CI_COMMIT_SHA
+
+deploy:
+  stage: deploy
+  only:
+    - main
+  script:
+    - kubectl set image deployment/api-gateway api-gateway=$REGISTRY/api-gateway:$CI_COMMIT_SHA
+`,
 }

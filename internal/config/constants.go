@@ -26,8 +26,8 @@ const (
 // UI layout ratios
 const (
 	NavigatorWidthRatio = 0.15
-	ContentWidthRatio   = 0.55
-	DetailWidthRatio    = 0.30
+	ContentWidthRatio   = 0.65
+	DetailWidthRatio    = 0.20
 	ReadmeHeightRatio   = 0.60
 )
 

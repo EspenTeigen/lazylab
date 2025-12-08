@@ -349,6 +349,9 @@ type MainScreen struct {
 	// Error handling
 	lastError string
 	retryCmd  tea.Cmd // Command to retry on 'r' key
+
+	// Demo mode (no API calls)
+	isDemo bool
 }
 
 // NewMainScreen creates a new main screen
@@ -465,6 +468,10 @@ func (m *MainScreen) rebuildNavTree() {
 
 // Init initializes the screen
 func (m *MainScreen) Init() tea.Cmd {
+	// Demo mode has pre-loaded data, no API calls needed
+	if m.isDemo {
+		return nil
+	}
 	m.loading = true
 	m.loadingMsg = "Loading groups..."
 	cmd := m.loadGroups()
@@ -473,6 +480,9 @@ func (m *MainScreen) Init() tea.Cmd {
 }
 
 func (m *MainScreen) loadGroups() tea.Cmd {
+	if m.isDemo {
+		return nil
+	}
 	return func() tea.Msg {
 		groups, err := m.client.ListGroups()
 		if err != nil {
@@ -483,6 +493,9 @@ func (m *MainScreen) loadGroups() tea.Cmd {
 }
 
 func (m *MainScreen) loadGroupProjects(groupID int, groupPath string) tea.Cmd {
+	if m.isDemo {
+		return nil
+	}
 	return func() tea.Msg {
 		projects, err := m.client.ListGroupProjects(groupPath)
 		if err != nil {
@@ -493,6 +506,9 @@ func (m *MainScreen) loadGroupProjects(groupID int, groupPath string) tea.Cmd {
 }
 
 func (m *MainScreen) loadAllProjects() tea.Cmd {
+	if m.isDemo {
+		return nil
+	}
 	return func() tea.Msg {
 		projects, err := m.client.ListProjects()
 		if err != nil {
@@ -514,7 +530,7 @@ func (m *MainScreen) loadProjectContent() tea.Cmd {
 }
 
 func (m *MainScreen) loadProjectContentForBranch(branch string) tea.Cmd {
-	if m.selectedProject == nil {
+	if m.selectedProject == nil || m.isDemo {
 		return nil
 	}
 	projectID := fmt.Sprintf("%d", m.selectedProject.ID)
@@ -543,7 +559,7 @@ func (m *MainScreen) loadProjectContentForBranch(branch string) tea.Cmd {
 }
 
 func (m *MainScreen) loadDirectory(path string) tea.Cmd {
-	if m.selectedProject == nil {
+	if m.selectedProject == nil || m.isDemo {
 		return nil
 	}
 	projectID := fmt.Sprintf("%d", m.selectedProject.ID)
@@ -565,7 +581,7 @@ func (m *MainScreen) loadDirectory(path string) tea.Cmd {
 }
 
 func (m *MainScreen) loadFile(filePath string) tea.Cmd {
-	if m.selectedProject == nil {
+	if m.selectedProject == nil || m.isDemo {
 		return nil
 	}
 	projectID := fmt.Sprintf("%d", m.selectedProject.ID)
@@ -587,7 +603,7 @@ func (m *MainScreen) loadFile(filePath string) tea.Cmd {
 }
 
 func (m *MainScreen) loadMRs() tea.Cmd {
-	if m.selectedProject == nil {
+	if m.selectedProject == nil || m.isDemo {
 		return nil
 	}
 	projectID := fmt.Sprintf("%d", m.selectedProject.ID)
@@ -601,7 +617,7 @@ func (m *MainScreen) loadMRs() tea.Cmd {
 }
 
 func (m *MainScreen) loadPipelines() tea.Cmd {
-	if m.selectedProject == nil {
+	if m.selectedProject == nil || m.isDemo {
 		return nil
 	}
 	projectID := fmt.Sprintf("%d", m.selectedProject.ID)
@@ -615,7 +631,7 @@ func (m *MainScreen) loadPipelines() tea.Cmd {
 }
 
 func (m *MainScreen) loadBranches() tea.Cmd {
-	if m.selectedProject == nil {
+	if m.selectedProject == nil || m.isDemo {
 		return nil
 	}
 	projectID := fmt.Sprintf("%d", m.selectedProject.ID)
@@ -629,7 +645,7 @@ func (m *MainScreen) loadBranches() tea.Cmd {
 }
 
 func (m *MainScreen) loadPipelineJobs(pipelineID int) tea.Cmd {
-	if m.selectedProject == nil {
+	if m.selectedProject == nil || m.isDemo {
 		return nil
 	}
 	projectID := fmt.Sprintf("%d", m.selectedProject.ID)
@@ -643,7 +659,7 @@ func (m *MainScreen) loadPipelineJobs(pipelineID int) tea.Cmd {
 }
 
 func (m *MainScreen) loadPipelineJobsForList(pipelineID int) tea.Cmd {
-	if m.selectedProject == nil {
+	if m.selectedProject == nil || m.isDemo {
 		return nil
 	}
 	projectID := fmt.Sprintf("%d", m.selectedProject.ID)
@@ -658,7 +674,7 @@ func (m *MainScreen) loadPipelineJobsForList(pipelineID int) tea.Cmd {
 }
 
 func (m *MainScreen) loadJobLog(jobID int) tea.Cmd {
-	if m.selectedProject == nil {
+	if m.selectedProject == nil || m.isDemo {
 		return nil
 	}
 	projectID := fmt.Sprintf("%d", m.selectedProject.ID)
@@ -716,7 +732,7 @@ func pipelineTickCmd() tea.Cmd {
 
 // refreshPipelines fetches pipelines without resetting selection
 func (m *MainScreen) refreshPipelines() tea.Cmd {
-	if m.selectedProject == nil {
+	if m.selectedProject == nil || m.isDemo {
 		return nil
 	}
 	projectID := fmt.Sprintf("%d", m.selectedProject.ID)
@@ -745,7 +761,7 @@ func jobLogTickCmd() tea.Cmd {
 
 // refreshJobLog fetches job log without resetting viewport position
 func (m *MainScreen) refreshJobLog() tea.Cmd {
-	if m.selectedProject == nil || m.selectedJobIdx < 0 || m.selectedJobIdx >= len(m.jobs) {
+	if m.selectedProject == nil || m.isDemo || m.selectedJobIdx < 0 || m.selectedJobIdx >= len(m.jobs) {
 		return nil
 	}
 	job := m.jobs[m.selectedJobIdx]
@@ -1053,7 +1069,7 @@ func (m *MainScreen) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				break
 			}
 		}
-		if len(m.branches) == 0 {
+		if len(m.branches) == 0 && !m.isDemo {
 			m.loading = true
 			m.loadingMsg = "Loading branches..."
 			cmd := m.loadBranches()
@@ -1169,16 +1185,22 @@ func (m *MainScreen) handleNavigatorNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.selectedProject = node.Project
 			m.currentPath = nil
 			m.currentBranch = ""
+			m.contentTab = TabFiles
+			m.focusedPanel = PanelContent
+
+			// In demo mode, data is pre-populated - don't clear or reload
+			if m.isDemo {
+				return m, nil
+			}
+
 			m.files = nil
 			m.mergeRequests = nil
 			m.pipelines = nil
 			m.branches = nil
 			m.fileContent = ""
 			m.readmeContent = ""
-			m.contentTab = TabFiles
 			m.loading = true
 			m.loadingMsg = "Loading repository..."
-			m.focusedPanel = PanelContent
 			cmd := m.loadProjectContent()
 			m.retryCmd = cmd
 			return m, cmd
@@ -1211,6 +1233,10 @@ func (m *MainScreen) handleContentNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// If in a directory, go up
 		if m.contentTab == TabFiles && len(m.currentPath) > 0 {
 			m.currentPath = m.currentPath[:len(m.currentPath)-1]
+			// Demo mode doesn't support directory navigation
+			if m.isDemo {
+				return m, nil
+			}
 			m.loading = true
 			m.loadingMsg = "Loading..."
 			path := strings.Join(m.currentPath, "/")
@@ -1245,6 +1271,10 @@ func (m *MainScreen) handleContentNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.contentTab == TabFiles && m.selectedContent < len(m.files) {
 			entry := m.files[m.selectedContent]
 			if entry.Type == "tree" {
+				// Demo mode doesn't support directory navigation
+				if m.isDemo {
+					return m, nil
+				}
 				m.currentPath = append(m.currentPath, entry.Name)
 				m.loading = true
 				m.loadingMsg = "Loading..."
@@ -1252,6 +1282,15 @@ func (m *MainScreen) handleContentNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.retryCmd = cmd
 				return m, cmd
 			} else {
+				// Demo mode uses mock file content
+				if m.isDemo {
+					if content, ok := MockFileContent[entry.Name]; ok {
+						m.fileContent = content
+						m.viewingFile = true
+						m.viewingFilePath = entry.Path
+					}
+					return m, nil
+				}
 				m.loading = true
 				m.loadingMsg = "Loading file..."
 				cmd := m.loadFile(entry.Path)
@@ -1261,6 +1300,10 @@ func (m *MainScreen) handleContentNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		// Load jobs for selected pipeline and show popup
 		if m.contentTab == TabPipelines && m.selectedContent < len(m.pipelines) {
+			// Demo mode doesn't support job log viewing
+			if m.isDemo {
+				return m, nil
+			}
 			pipeline := m.pipelines[m.selectedContent]
 			m.jobs = nil
 			m.jobLog = ""
@@ -1386,6 +1429,10 @@ func (m *MainScreen) handleBranchPopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.selectedBranchIdx < len(m.branches) {
 			m.currentBranch = m.branches[m.selectedBranchIdx].Name
 			m.showBranchPopup = false
+			// Demo mode doesn't support branch switching
+			if m.isDemo {
+				return m, nil
+			}
 			// Reload files for new branch
 			m.files = nil
 			m.currentPath = nil
@@ -1413,7 +1460,7 @@ func (m *MainScreen) handleJobLogPopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "j", "down":
 		// Next job
-		if m.selectedJobIdx < len(m.jobs)-1 {
+		if m.selectedJobIdx < len(m.jobs)-1 && !m.isDemo {
 			m.selectedJobIdx++
 			m.jobLog = ""
 			m.jobLogReady = false
@@ -1426,7 +1473,7 @@ func (m *MainScreen) handleJobLogPopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "k", "up":
 		// Previous job
-		if m.selectedJobIdx > 0 {
+		if m.selectedJobIdx > 0 && !m.isDemo {
 			m.selectedJobIdx--
 			m.jobLog = ""
 			m.jobLogReady = false
@@ -1468,7 +1515,7 @@ func (m *MainScreen) switchTab(tab ContentTab) tea.Cmd {
 	m.selectedContent = 0
 	m.fileContent = ""
 
-	if m.selectedProject == nil {
+	if m.selectedProject == nil || m.isDemo {
 		return nil
 	}
 
