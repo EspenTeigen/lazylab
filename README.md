@@ -4,8 +4,6 @@ A terminal UI for GitLab, inspired by [lazygit](https://github.com/jesseduffield
 
 > **Note:** This is a vibe-coded project. I haven't written a single line of code myself - it's entirely AI-generated using [Claude Code](https://claude.ai/claude-code). I built this because I wanted it, not as a showcase of coding skills. If the code style isn't perfect, I don't care - it works for my use case.
 
-![lazylab demo](https://via.placeholder.com/800x400?text=lazylab+screenshot)
-
 ## Features
 
 - Browse groups and projects in a tree view

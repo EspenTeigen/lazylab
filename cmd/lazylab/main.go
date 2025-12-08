@@ -11,11 +11,14 @@ import (
 
 func main() {
 	setup := flag.Bool("setup", false, "Configure GitLab connection (add/change host and token)")
+	demo := flag.Bool("demo", false, "Run with mock data (for screenshots/demos)")
 	flag.Parse()
 
 	// Check for credentials and show appropriate screen
 	var screen tea.Model
-	if *setup || !app.HasCredentials() {
+	if *demo {
+		screen = app.NewDemoScreen()
+	} else if *setup || !app.HasCredentials() {
 		screen = app.NewLauncher()
 	} else {
 		screen = app.NewMainScreen()
