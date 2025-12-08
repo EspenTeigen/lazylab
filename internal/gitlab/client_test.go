@@ -132,7 +132,7 @@ func TestClient_ListBranches(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(branches)
+		_ = json.NewEncoder(w).Encode(branches)
 	}))
 	defer server.Close()
 
@@ -161,7 +161,7 @@ func TestClient_ListMergeRequests(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(mrs)
+		_ = json.NewEncoder(w).Encode(mrs)
 	}))
 	defer server.Close()
 
@@ -183,7 +183,7 @@ func TestClient_ListPipelines(t *testing.T) {
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(pipelines)
+		_ = json.NewEncoder(w).Encode(pipelines)
 	}))
 	defer server.Close()
 
@@ -213,7 +213,7 @@ func TestClient_GetTree(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(entries)
+		_ = json.NewEncoder(w).Encode(entries)
 	}))
 	defer server.Close()
 
@@ -239,7 +239,7 @@ func TestClient_SearchProjects(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(projects)
+		_ = json.NewEncoder(w).Encode(projects)
 	}))
 	defer server.Close()
 
