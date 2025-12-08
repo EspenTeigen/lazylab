@@ -114,6 +114,16 @@ If you use [glab](https://gitlab.com/gitlab-org/cli), lazylab will automatically
 | `y` | Copy log to clipboard |
 | `Esc` | Close |
 
+## Security
+
+**This application is strictly read-only.** It will never modify any data on your GitLab instance.
+
+- All write operations (POST, PUT, PATCH, DELETE) are blocked at the client level
+- Only `read_api` scope is required - no write permissions needed
+- Safety checks are enforced in code and covered by tests
+
+You can safely use lazylab with your production GitLab instance without worrying about accidental modifications.
+
 ## Requirements
 
 - GitLab Personal Access Token with `read_api` scope

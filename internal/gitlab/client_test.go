@@ -309,3 +309,38 @@ func TestIsRetryableStatus(t *testing.T) {
 		}
 	}
 }
+
+// TestReadOnlySafety verifies that non-GET requests are blocked.
+// This is a critical safety test - DO NOT REMOVE.
+// It ensures that even if someone accidentally adds a write method,
+// the client will refuse to execute it.
+func TestReadOnlySafety(t *testing.T) {
+	client := NewClient("https://gitlab.com", "test-token")
+
+	// Test all write methods are blocked
+	writeMethods := []string{
+		http.MethodPost,
+		http.MethodPut,
+		http.MethodPatch,
+		http.MethodDelete,
+	}
+
+	for _, method := range writeMethods {
+		req, err := http.NewRequest(method, "https://gitlab.com/api/v4/test", nil)
+		if err != nil {
+			t.Fatalf("failed to create request: %v", err)
+		}
+
+		_, err = client.doWithRetry(req)
+		if err != ErrWriteNotAllowed {
+			t.Errorf("%s request should be blocked with ErrWriteNotAllowed, got: %v", method, err)
+		}
+	}
+
+	// Verify GET is still allowed (will fail due to no server, but shouldn't be ErrWriteNotAllowed)
+	req, _ := http.NewRequest(http.MethodGet, "https://gitlab.com/api/v4/test", nil)
+	_, err := client.doWithRetry(req)
+	if err == ErrWriteNotAllowed {
+		t.Error("GET request should not be blocked")
+	}
+}

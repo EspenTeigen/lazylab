@@ -12,7 +12,15 @@ import (
 	"github.com/EspenTeigen/lazylab/internal/config"
 )
 
-// Client is a GitLab API client
+// SAFETY: This client is READ-ONLY by design.
+// All requests MUST use GET method. This is enforced in doWithRetry().
+// DO NOT add POST, PUT, PATCH, or DELETE methods.
+// This application should NEVER modify any GitLab data.
+
+// ErrWriteNotAllowed is returned when attempting non-GET requests
+var ErrWriteNotAllowed = fmt.Errorf("write operations are not allowed - this client is read-only")
+
+// Client is a GitLab API client (READ-ONLY)
 type Client struct {
 	baseURL    string
 	token      string
@@ -57,7 +65,13 @@ func isRetryableStatus(statusCode int) bool {
 }
 
 // doWithRetry executes an HTTP request with retry logic
+// SAFETY: Only GET requests are allowed - this is enforced here
 func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
+	// SAFETY CHECK: Block any non-GET requests
+	if req.Method != http.MethodGet {
+		return nil, ErrWriteNotAllowed
+	}
+
 	var lastErr error
 	backoff := config.InitialBackoff
 
