@@ -9,8 +9,13 @@ import (
 )
 
 func main() {
-	// Create main screen (lazygit-style multi-panel)
-	screen := app.NewMainScreen()
+	// Check for credentials and show appropriate screen
+	var screen tea.Model
+	if app.HasCredentials() {
+		screen = app.NewMainScreen()
+	} else {
+		screen = app.NewLauncher()
+	}
 
 	// Run the TUI
 	p := tea.NewProgram(

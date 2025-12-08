@@ -7,12 +7,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
-)
 
-const (
-	maxRetries     = 3
-	initialBackoff = 500 * time.Millisecond
-	maxBackoff     = 5 * time.Second
+	"github.com/espen/lazylab/internal/config"
 )
 
 // Client is a GitLab API client
@@ -20,62 +16,88 @@ type Client struct {
 	baseURL    string
 	token      string
 	httpClient *http.Client
+	perPage    int
+}
+
+// ClientOption allows configuring the client
+type ClientOption func(*Client)
+
+// WithPerPage sets the default per_page for list requests
+func WithPerPage(n int) ClientOption {
+	return func(c *Client) {
+		c.perPage = n
+	}
 }
 
 // NewClient creates a new GitLab client
-func NewClient(baseURL string, token string) *Client {
-	return &Client{
+func NewClient(baseURL, token string, opts ...ClientOption) *Client {
+	c := &Client{
 		baseURL: baseURL,
 		token:   token,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: config.DefaultTimeout,
 		},
+		perPage: config.DefaultPerPage,
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // NewPublicClient creates a client for gitlab.com public repos (no auth)
 func NewPublicClient() *Client {
-	return NewClient("https://gitlab.com", "")
+	return NewClient("https://"+config.DefaultHost, "")
 }
 
-// isRetryable returns true if the error or status code should trigger a retry
+// isRetryableStatus returns true if the status code should trigger a retry
 func isRetryableStatus(statusCode int) bool {
-	// Retry on server errors (5xx) and rate limiting (429)
-	return statusCode >= 500 || statusCode == 429
+	return statusCode >= config.ServerErrorMin || statusCode == config.RateLimitStatus
 }
 
 // doWithRetry executes an HTTP request with retry logic
 func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
 	var lastErr error
-	backoff := initialBackoff
+	backoff := config.InitialBackoff
 
-	for attempt := 0; attempt <= maxRetries; attempt++ {
+	for attempt := 0; attempt <= config.MaxRetries; attempt++ {
 		if attempt > 0 {
-			time.Sleep(backoff)
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
+			select {
+			case <-req.Context().Done():
+				return nil, req.Context().Err()
+			default:
 			}
+			// Use a simple sleep - in production you'd want a timer
+			sleepDuration := backoff
+			backoff *= 2
+			if backoff > config.MaxBackoff {
+				backoff = config.MaxBackoff
+			}
+			// Simple blocking sleep
+			<-sleepChan(sleepDuration)
 		}
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
-			lastErr = fmt.Errorf("executing request (attempt %d/%d): %w", attempt+1, maxRetries+1, err)
+			lastErr = fmt.Errorf("request failed (attempt %d/%d): %w", attempt+1, config.MaxRetries+1, err)
 			continue
 		}
 
-		// Don't retry on success or client errors (4xx except 429)
-		if resp.StatusCode < 500 && resp.StatusCode != 429 {
+		if !isRetryableStatus(resp.StatusCode) {
 			return resp, nil
 		}
 
-		// Retryable error - close body and retry
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		lastErr = fmt.Errorf("API error %d (attempt %d/%d): %s", resp.StatusCode, attempt+1, maxRetries+1, string(body))
+		lastErr = fmt.Errorf("API error %d (attempt %d/%d): %s", resp.StatusCode, attempt+1, config.MaxRetries+1, string(body))
 	}
 
 	return nil, lastErr
+}
+
+// sleepChan returns a channel that closes after the duration
+func sleepChan(d time.Duration) <-chan time.Time {
+	return time.After(d)
 }
 
 func (c *Client) get(path string, result interface{}) error {
@@ -119,11 +141,12 @@ func (c *Client) GetProject(projectID string) (*Project, error) {
 }
 
 // GetTree fetches the repository tree for a project
-func (c *Client) GetTree(projectID string, ref string, treePath string) ([]TreeEntry, error) {
+func (c *Client) GetTree(projectID, ref, treePath string) ([]TreeEntry, error) {
 	var entries []TreeEntry
-	path := fmt.Sprintf("/projects/%s/repository/tree?ref=%s&per_page=100",
+	path := fmt.Sprintf("/projects/%s/repository/tree?ref=%s&per_page=%d",
 		url.PathEscape(projectID),
-		url.QueryEscape(ref))
+		url.QueryEscape(ref),
+		c.perPage)
 
 	if treePath != "" {
 		path += "&path=" + url.QueryEscape(treePath)
@@ -174,7 +197,7 @@ func (c *Client) GetFileContent(projectID string, filePath string, ref string) (
 // ListBranches fetches branches for a project
 func (c *Client) ListBranches(projectID string) ([]Branch, error) {
 	var branches []Branch
-	path := fmt.Sprintf("/projects/%s/repository/branches?per_page=20", url.PathEscape(projectID))
+	path := fmt.Sprintf("/projects/%s/repository/branches?per_page=%d", url.PathEscape(projectID), c.perPage)
 	if err := c.get(path, &branches); err != nil {
 		return nil, err
 	}
@@ -184,7 +207,7 @@ func (c *Client) ListBranches(projectID string) ([]Branch, error) {
 // ListMergeRequests fetches open MRs for a project
 func (c *Client) ListMergeRequests(projectID string) ([]MergeRequest, error) {
 	var mrs []MergeRequest
-	path := fmt.Sprintf("/projects/%s/merge_requests?state=opened&per_page=20", url.PathEscape(projectID))
+	path := fmt.Sprintf("/projects/%s/merge_requests?state=opened&per_page=%d", url.PathEscape(projectID), c.perPage)
 	if err := c.get(path, &mrs); err != nil {
 		return nil, err
 	}
@@ -194,7 +217,7 @@ func (c *Client) ListMergeRequests(projectID string) ([]MergeRequest, error) {
 // ListPipelines fetches recent pipelines for a project
 func (c *Client) ListPipelines(projectID string) ([]Pipeline, error) {
 	var pipelines []Pipeline
-	path := fmt.Sprintf("/projects/%s/pipelines?per_page=20", url.PathEscape(projectID))
+	path := fmt.Sprintf("/projects/%s/pipelines?per_page=%d", url.PathEscape(projectID), c.perPage)
 	if err := c.get(path, &pipelines); err != nil {
 		return nil, err
 	}
@@ -204,7 +227,7 @@ func (c *Client) ListPipelines(projectID string) ([]Pipeline, error) {
 // ListGroupProjects fetches projects from a group
 func (c *Client) ListGroupProjects(groupID string) ([]Project, error) {
 	var projects []Project
-	path := fmt.Sprintf("/groups/%s/projects?per_page=50&order_by=last_activity_at", url.PathEscape(groupID))
+	path := fmt.Sprintf("/groups/%s/projects?per_page=%d&order_by=last_activity_at", url.PathEscape(groupID), c.perPage)
 	if err := c.get(path, &projects); err != nil {
 		return nil, err
 	}
@@ -214,7 +237,7 @@ func (c *Client) ListGroupProjects(groupID string) ([]Project, error) {
 // ListProjects fetches all accessible projects (for self-hosted instances)
 func (c *Client) ListProjects() ([]Project, error) {
 	var projects []Project
-	path := "/projects?per_page=50&order_by=last_activity_at&membership=true"
+	path := fmt.Sprintf("/projects?per_page=%d&order_by=last_activity_at&membership=true", c.perPage)
 	if err := c.get(path, &projects); err != nil {
 		return nil, err
 	}
@@ -224,7 +247,7 @@ func (c *Client) ListProjects() ([]Project, error) {
 // ListGroups fetches all accessible groups
 func (c *Client) ListGroups() ([]Group, error) {
 	var groups []Group
-	path := "/groups?per_page=50&order_by=name"
+	path := fmt.Sprintf("/groups?per_page=%d&order_by=name", c.perPage)
 	if err := c.get(path, &groups); err != nil {
 		return nil, err
 	}
@@ -234,12 +257,31 @@ func (c *Client) ListGroups() ([]Group, error) {
 // ListPipelineJobs fetches jobs for a specific pipeline
 func (c *Client) ListPipelineJobs(projectID string, pipelineID int) ([]Job, error) {
 	var jobs []Job
-	path := fmt.Sprintf("/projects/%s/pipelines/%d/jobs?per_page=50",
-		url.PathEscape(projectID), pipelineID)
+	path := fmt.Sprintf("/projects/%s/pipelines/%d/jobs?per_page=%d", url.PathEscape(projectID), pipelineID, c.perPage)
 	if err := c.get(path, &jobs); err != nil {
 		return nil, err
 	}
 	return jobs, nil
+}
+
+// SearchProjects searches for projects by name
+func (c *Client) SearchProjects(query string) ([]Project, error) {
+	var projects []Project
+	path := fmt.Sprintf("/projects?search=%s&per_page=%d&order_by=last_activity_at", url.QueryEscape(query), c.perPage)
+	if err := c.get(path, &projects); err != nil {
+		return nil, err
+	}
+	return projects, nil
+}
+
+// SearchGroups searches for groups by name
+func (c *Client) SearchGroups(query string) ([]Group, error) {
+	var groups []Group
+	path := fmt.Sprintf("/groups?search=%s&per_page=%d&order_by=name", url.QueryEscape(query), c.perPage)
+	if err := c.get(path, &groups); err != nil {
+		return nil, err
+	}
+	return groups, nil
 }
 
 // GetJobLog fetches the log/trace for a specific job

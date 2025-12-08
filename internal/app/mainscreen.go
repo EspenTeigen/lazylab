@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
@@ -17,6 +16,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/espen/lazylab/internal/config"
 	"github.com/espen/lazylab/internal/gitlab"
@@ -104,14 +104,31 @@ func highlightCode(code, filename string) string {
 	return buf.String()
 }
 
-// getFileExtension returns the extension of a file path
-func getFileExtension(path string) string {
-	return filepath.Ext(path)
-}
-
 // stripANSI removes ANSI escape codes from a string
 func stripANSI(s string) string {
 	return ansiRegex.ReplaceAllString(s, "")
+}
+
+// renderMarkdown renders markdown content for terminal display
+func renderMarkdown(content string) string {
+	if content == "" {
+		return ""
+	}
+
+	renderer, err := glamour.NewTermRenderer(
+		glamour.WithAutoStyle(),
+		glamour.WithWordWrap(0), // We'll handle wrapping in the viewport
+	)
+	if err != nil {
+		return content // Fall back to raw content
+	}
+
+	rendered, err := renderer.Render(content)
+	if err != nil {
+		return content // Fall back to raw content
+	}
+
+	return strings.TrimSpace(rendered)
 }
 
 // wrapText wraps all lines in text to fit within maxWidth
@@ -132,13 +149,21 @@ func wrapText(text string, maxWidth int) string {
 		// Wrap long line
 		remaining := line
 		for len(remaining) > maxWidth {
-			// Find break point
+			// Find break point - look for space to break at
 			breakAt := maxWidth
-			for i := maxWidth; i > maxWidth/2; i-- {
+			minBreak := maxWidth / 2
+			if minBreak < 0 {
+				minBreak = 0
+			}
+			for i := maxWidth - 1; i >= minBreak && i < len(remaining); i-- {
 				if remaining[i] == ' ' {
 					breakAt = i
 					break
 				}
+			}
+			// Safety check
+			if breakAt > len(remaining) {
+				breakAt = len(remaining)
 			}
 			result = append(result, remaining[:breakAt])
 			remaining = remaining[breakAt:]
@@ -158,13 +183,23 @@ func wrapText(text string, maxWidth int) string {
 type PanelID int
 
 const (
-	PanelGroups PanelID = iota
-	PanelProjects
+	PanelNavigator PanelID = iota
 	PanelContent
 	PanelReadme
 	PanelDetail
-	PanelCount
 )
+
+// TreeNode represents an item in the navigator tree
+type TreeNode struct {
+	Type     string // "group" or "project"
+	Name     string
+	FullPath string
+	ID       int
+	Depth    int
+	Expanded bool
+	Group    *gitlab.Group
+	Project  *gitlab.Project
+}
 
 // ContentTab identifies tabs in the content panel
 type ContentTab int
@@ -183,13 +218,15 @@ type MainScreen struct {
 	// GitLab client
 	client *gitlab.Client
 
-	// Current group
-	groupPath string
+	// Navigator tree
+	treeNodes       []TreeNode
+	selectedNodeIdx int
+	expandedGroups  map[int]bool             // group ID -> expanded
+	groupProjects   map[int][]gitlab.Project // group ID -> projects (cache)
 
-	// Data
-	groups        []gitlab.Group
-	projects      []gitlab.Project
-	files         []gitlab.TreeEntry
+	// Raw data
+	groups  []gitlab.Group
+	files   []gitlab.TreeEntry
 	mergeRequests []gitlab.MergeRequest
 	pipelines     []gitlab.Pipeline
 	branches      []gitlab.Branch
@@ -203,16 +240,15 @@ type MainScreen struct {
 	selectedProject *gitlab.Project
 
 	// File browser state
-	currentPath    []string
-	fileContent    string
-	readmeContent  string
-	viewingFile    bool
+	currentPath     []string
+	fileContent     string
+	readmeContent         string
+	readmeRendered        string
+	viewingFile           bool
 	viewingFilePath string
 
 	// Selection indices
-	selectedGroupIdx   int
-	selectedProjectIdx int
-	selectedContent    int
+	selectedContent int
 
 	// Focus
 	focusedPanel PanelID
@@ -257,23 +293,49 @@ type MainScreen struct {
 	currentBranch    string
 
 	// Status message (for clipboard feedback etc)
-	statusMsg     string
-	statusMsgTime int
+	statusMsg string
 
 	// Error handling
-	lastError     string
-	lastErrorTime int
-	retryCmd      tea.Cmd // Command to retry on 'r' key
+	lastError string
+	retryCmd  tea.Cmd // Command to retry on 'r' key
 }
 
 // NewMainScreen creates a new main screen
 func NewMainScreen() *MainScreen {
-	// Priority: env vars > glab config > defaults
-	token := os.Getenv("GITLAB_TOKEN")
-	host := os.Getenv("GITLAB_HOST")
-	groupPath := os.Getenv("GITLAB_GROUP")
+	token, host := loadCredentials()
+	client := createClient(host, token)
 
-	// Try to load glab config if env vars not set
+	return &MainScreen{
+		client:         client,
+		focusedPanel:   PanelNavigator,
+		contentTab:     TabFiles,
+		keymap:         keymap.DefaultKeyMap(),
+		expandedGroups: make(map[int]bool),
+		groupProjects:  make(map[int][]gitlab.Project),
+	}
+}
+
+// loadCredentials loads GitLab credentials from env vars, lazylab config, or glab config
+func loadCredentials() (token, host string) {
+	// 1. Check environment variables (highest priority)
+	token = os.Getenv(config.EnvGitLabToken)
+	host = os.Getenv(config.EnvGitLabHost)
+
+	// 2. Fall back to lazylab config
+	if token == "" || host == "" {
+		if lazylabConfig, err := config.LoadLazyLabConfig(); err == nil {
+			if host == "" {
+				host = lazylabConfig.GetDefaultHost()
+			}
+			if hostConfig := lazylabConfig.GetHostConfig(host); hostConfig != nil {
+				if token == "" {
+					token = hostConfig.Token
+				}
+			}
+		}
+	}
+
+	// 3. Fall back to glab config
 	if token == "" || host == "" {
 		if glabConfig, err := config.LoadGlabConfig(); err == nil {
 			if host == "" {
@@ -289,30 +351,64 @@ func NewMainScreen() *MainScreen {
 
 	// Apply defaults
 	if host == "" {
-		host = "gitlab.com"
-	}
-	if groupPath == "" {
-		groupPath = "gitlab-org"
+		host = config.DefaultHost
 	}
 
-	// Build the full URL if needed
-	if host != "" && !strings.HasPrefix(host, "http") {
+	// Ensure host has protocol
+	if !strings.HasPrefix(host, "http") {
 		host = "https://" + host
 	}
 
-	var client *gitlab.Client
-	if token != "" {
-		client = gitlab.NewClient(host, token)
-	} else {
-		client = gitlab.NewPublicClient()
-	}
+	return token, host
+}
 
-	return &MainScreen{
-		client:       client,
-		groupPath:    groupPath,
-		focusedPanel: PanelProjects,
-		contentTab:   TabFiles,
-		keymap:       keymap.DefaultKeyMap(),
+// HasCredentials checks if valid credentials are available
+func HasCredentials() bool {
+	token, _ := loadCredentials()
+	return token != ""
+}
+
+// createClient creates a GitLab client with the given credentials
+func createClient(host, token string) *gitlab.Client {
+	if token != "" {
+		return gitlab.NewClient(host, token)
+	}
+	return gitlab.NewPublicClient()
+}
+
+// rebuildNavTree rebuilds the flat tree representation from groups and their projects
+func (m *MainScreen) rebuildNavTree() {
+	m.treeNodes = nil
+
+	for _, g := range m.groups {
+		// Add group node
+		groupNode := TreeNode{
+			Type:     "group",
+			Name:     g.Name,
+			FullPath: g.FullPath,
+			ID:       g.ID,
+			Depth:    0,
+			Expanded: m.expandedGroups[g.ID],
+			Group:    &g,
+		}
+		m.treeNodes = append(m.treeNodes, groupNode)
+
+		// If expanded, add projects
+		if m.expandedGroups[g.ID] {
+			if projects, ok := m.groupProjects[g.ID]; ok {
+				for _, p := range projects {
+					projectNode := TreeNode{
+						Type:     "project",
+						Name:     p.Name,
+						FullPath: p.PathWithNamespace,
+						ID:       p.ID,
+						Depth:    1,
+						Project:  &p,
+					}
+					m.treeNodes = append(m.treeNodes, projectNode)
+				}
+			}
+		}
 	}
 }
 
@@ -335,21 +431,23 @@ func (m *MainScreen) loadGroups() tea.Cmd {
 	}
 }
 
-func (m *MainScreen) loadProjects() tea.Cmd {
+func (m *MainScreen) loadGroupProjects(groupID int, groupPath string) tea.Cmd {
 	return func() tea.Msg {
-		var projects []gitlab.Project
-		var err error
-
-		if m.groupPath != "" {
-			projects, err = m.client.ListGroupProjects(m.groupPath)
-		} else {
-			projects, err = m.client.ListProjects()
-		}
-
+		projects, err := m.client.ListGroupProjects(groupPath)
 		if err != nil {
 			return errMsg{err: err}
 		}
-		return projectsLoadedMsg{projects: projects}
+		return groupProjectsLoadedMsg{groupID: groupID, projects: projects}
+	}
+}
+
+func (m *MainScreen) loadAllProjects() tea.Cmd {
+	return func() tea.Msg {
+		projects, err := m.client.ListProjects()
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return allProjectsLoadedMsg{projects: projects}
 	}
 }
 
@@ -525,7 +623,11 @@ func (m *MainScreen) loadJobLog(jobID int) tea.Cmd {
 // Messages
 type errMsg struct{ err error }
 type groupsLoadedMsg struct{ groups []gitlab.Group }
-type projectsLoadedMsg struct{ projects []gitlab.Project }
+type groupProjectsLoadedMsg struct {
+	groupID  int
+	projects []gitlab.Project
+}
+type allProjectsLoadedMsg struct{ projects []gitlab.Project }
 type projectContentMsg struct {
 	entries []gitlab.TreeEntry
 	readme  string
@@ -566,19 +668,38 @@ func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case groupsLoadedMsg:
 		m.groups = msg.groups
 		m.loading = false
-		m.lastError = "" // Clear any previous error
+		m.lastError = ""
+		m.rebuildNavTree()
 		// If no groups, load all projects directly
 		if len(m.groups) == 0 {
 			m.loading = true
 			m.loadingMsg = "Loading projects..."
-			cmd := m.loadProjects()
+			cmd := m.loadAllProjects()
 			m.retryCmd = cmd
 			return m, cmd
 		}
 		return m, nil
 
-	case projectsLoadedMsg:
-		m.projects = msg.projects
+	case groupProjectsLoadedMsg:
+		m.groupProjects[msg.groupID] = msg.projects
+		m.loading = false
+		m.lastError = ""
+		m.rebuildNavTree()
+		return m, nil
+
+	case allProjectsLoadedMsg:
+		// When no groups exist, show all projects as root nodes
+		for _, p := range msg.projects {
+			projectNode := TreeNode{
+				Type:     "project",
+				Name:     p.Name,
+				FullPath: p.PathWithNamespace,
+				ID:       p.ID,
+				Depth:    0,
+				Project:  &p,
+			}
+			m.treeNodes = append(m.treeNodes, projectNode)
+		}
 		m.loading = false
 		m.lastError = ""
 		return m, nil
@@ -586,6 +707,7 @@ func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case projectContentMsg:
 		m.files = msg.entries
 		m.readmeContent = msg.readme
+		m.readmeRendered = renderMarkdown(msg.readme)
 		m.fileContent = ""
 		m.selectedContent = 0
 		m.fileScrollOffset = 0
@@ -750,20 +872,20 @@ func (m *MainScreen) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Panel navigation with Shift+HJKL
 	// Layout:
-	// [1 Groups  ] [3 Content ] [5 Detail]
-	// [2 Projects] [4 README  ]
+	// [1 Navigator] [2 Content ] [4 Detail]
+	//               [3 README  ]
 	switch msg.String() {
 	case "H", "shift+left":
 		switch m.focusedPanel {
 		case PanelContent, PanelReadme:
-			m.focusedPanel = PanelProjects
+			m.focusedPanel = PanelNavigator
 		case PanelDetail:
 			m.focusedPanel = PanelContent
 		}
 		return m, nil
 	case "L", "shift+right":
 		switch m.focusedPanel {
-		case PanelGroups, PanelProjects:
+		case PanelNavigator:
 			m.focusedPanel = PanelContent
 		case PanelContent, PanelReadme:
 			m.focusedPanel = PanelDetail
@@ -771,42 +893,33 @@ func (m *MainScreen) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "K", "shift+up":
 		switch m.focusedPanel {
-		case PanelProjects:
-			m.focusedPanel = PanelGroups
 		case PanelReadme:
 			m.focusedPanel = PanelContent
 		}
 		return m, nil
 	case "J", "shift+down":
 		switch m.focusedPanel {
-		case PanelGroups:
-			m.focusedPanel = PanelProjects
 		case PanelContent:
 			m.focusedPanel = PanelReadme
 		}
 		return m, nil
 	case "1":
-		m.focusedPanel = PanelGroups
+		m.focusedPanel = PanelNavigator
 		return m, nil
 	case "2":
-		m.focusedPanel = PanelProjects
-		return m, nil
-	case "3":
 		m.focusedPanel = PanelContent
 		return m, nil
-	case "4":
+	case "3":
 		m.focusedPanel = PanelReadme
 		return m, nil
-	case "5":
+	case "4":
 		m.focusedPanel = PanelDetail
 		return m, nil
 	}
 
 	switch m.focusedPanel {
-	case PanelGroups:
-		return m.handleGroupsNav(msg)
-	case PanelProjects:
-		return m.handleProjectsNav(msg)
+	case PanelNavigator:
+		return m.handleNavigatorNav(msg)
 	case PanelContent:
 		return m.handleContentNav(msg)
 	case PanelReadme:
@@ -818,50 +931,49 @@ func (m *MainScreen) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *MainScreen) handleGroupsNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch {
-	case key.Matches(msg, m.keymap.Down):
-		if m.selectedGroupIdx < len(m.groups)-1 {
-			m.selectedGroupIdx++
-		}
-	case key.Matches(msg, m.keymap.Up):
-		if m.selectedGroupIdx > 0 {
-			m.selectedGroupIdx--
-		}
-	case key.Matches(msg, m.keymap.Right), key.Matches(msg, m.keymap.Select):
-		// Select group and load its projects
-		if m.selectedGroupIdx < len(m.groups) {
-			m.groupPath = m.groups[m.selectedGroupIdx].FullPath
-			m.projects = nil
-			m.selectedProjectIdx = 0
-			m.loading = true
-			m.loadingMsg = "Loading projects..."
-			m.focusedPanel = PanelProjects
-			cmd := m.loadProjects()
-			m.retryCmd = cmd
-			return m, cmd
-		}
-		m.focusedPanel = PanelProjects
+func (m *MainScreen) handleNavigatorNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if len(m.treeNodes) == 0 {
+		return m, nil
 	}
-	return m, nil
-}
 
-func (m *MainScreen) handleProjectsNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keymap.Down):
-		if m.selectedProjectIdx < len(m.projects)-1 {
-			m.selectedProjectIdx++
+		if m.selectedNodeIdx < len(m.treeNodes)-1 {
+			m.selectedNodeIdx++
 		}
 	case key.Matches(msg, m.keymap.Up):
-		if m.selectedProjectIdx > 0 {
-			m.selectedProjectIdx--
+		if m.selectedNodeIdx > 0 {
+			m.selectedNodeIdx--
 		}
-	case key.Matches(msg, m.keymap.Left):
-		m.focusedPanel = PanelGroups
 	case key.Matches(msg, m.keymap.Right), key.Matches(msg, m.keymap.Select):
-		// Select project and load its content
-		if m.selectedProjectIdx < len(m.projects) {
-			m.selectedProject = &m.projects[m.selectedProjectIdx]
+		if m.selectedNodeIdx >= len(m.treeNodes) {
+			return m, nil
+		}
+
+		node := m.treeNodes[m.selectedNodeIdx]
+
+		if node.Type == "group" {
+			// Toggle group expansion
+			if m.expandedGroups[node.ID] {
+				// Collapse
+				m.expandedGroups[node.ID] = false
+				m.rebuildNavTree()
+			} else {
+				// Expand - check if we have projects cached
+				m.expandedGroups[node.ID] = true
+				if _, ok := m.groupProjects[node.ID]; !ok {
+					// Need to load projects
+					m.loading = true
+					m.loadingMsg = "Loading projects..."
+					cmd := m.loadGroupProjects(node.ID, node.FullPath)
+					m.retryCmd = cmd
+					return m, cmd
+				}
+				m.rebuildNavTree()
+			}
+		} else if node.Type == "project" && node.Project != nil {
+			// Select project and load its content
+			m.selectedProject = node.Project
 			m.currentPath = nil
 			m.currentBranch = ""
 			m.files = nil
@@ -877,6 +989,17 @@ func (m *MainScreen) handleProjectsNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			cmd := m.loadProjectContent()
 			m.retryCmd = cmd
 			return m, cmd
+		}
+	case key.Matches(msg, m.keymap.Left):
+		if m.selectedNodeIdx >= len(m.treeNodes) {
+			return m, nil
+		}
+
+		node := m.treeNodes[m.selectedNodeIdx]
+		if node.Type == "group" && m.expandedGroups[node.ID] {
+			// Collapse the group
+			m.expandedGroups[node.ID] = false
+			m.rebuildNavTree()
 		}
 	}
 	return m, nil
@@ -902,8 +1025,8 @@ func (m *MainScreen) handleContentNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.retryCmd = cmd
 			return m, cmd
 		}
-		// If at root, go back to projects
-		m.focusedPanel = PanelProjects
+		// If at root, go back to navigator
+		m.focusedPanel = PanelNavigator
 		return m, nil
 	}
 
@@ -913,8 +1036,8 @@ func (m *MainScreen) handleContentNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.contentTab > TabFiles {
 			return m, m.switchTab(m.contentTab - 1)
 		}
-		// At first tab, go to projects panel
-		m.focusedPanel = PanelProjects
+		// At first tab, go to navigator panel
+		m.focusedPanel = PanelNavigator
 
 	case key.Matches(msg, m.keymap.Right):
 		// l - switch to next tab
@@ -1024,7 +1147,7 @@ func (m *MainScreen) adjustScrollOffset() {
 func (m *MainScreen) handleReadmeNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keymap.Left):
-		m.focusedPanel = PanelProjects
+		m.focusedPanel = PanelNavigator
 	case key.Matches(msg, m.keymap.Right):
 		m.focusedPanel = PanelDetail
 	case key.Matches(msg, m.keymap.Up):
@@ -1208,33 +1331,6 @@ func (m *MainScreen) View() string {
 		return fmt.Sprintf("Error: %s\n\nPress q to quit", m.errMsg)
 	}
 
-	// Calculate dimensions
-	contentHeight := m.height - 1
-	leftWidth := m.width / 4
-	rightWidth := m.width - leftWidth
-
-	groupsHeight := contentHeight / 3
-	projectsHeight := contentHeight - groupsHeight
-
-	contentWidth := rightWidth * 2 / 3
-	detailWidth := rightWidth - contentWidth
-
-	// Render panels
-	groupsPanel := m.renderGroupsPanel(leftWidth, groupsHeight)
-	projectsPanel := m.renderProjectsPanel(leftWidth, projectsHeight)
-	contentPanel := m.renderContentPanel(contentWidth, contentHeight)
-	detailPanel := m.renderDetailPanel(detailWidth, contentHeight)
-
-	// Combine left column
-	leftColumn := lipgloss.JoinVertical(lipgloss.Left, groupsPanel, projectsPanel)
-
-	// Combine right side
-	rightSide := lipgloss.JoinHorizontal(lipgloss.Top, contentPanel, detailPanel)
-
-	// Combine all
-	main := lipgloss.JoinHorizontal(lipgloss.Top, leftColumn, rightSide)
-	statusBar := m.renderStatusBar()
-
 	// If popup is shown, render only the popup
 	if m.showJobLogPopup {
 		return m.renderJobLogPopup()
@@ -1243,49 +1339,94 @@ func (m *MainScreen) View() string {
 		return m.renderBranchPopup()
 	}
 
+	// Calculate dimensions using config ratios
+	contentHeight := m.height - config.StatusBarHeight
+	navWidth := int(float64(m.width) * config.NavigatorWidthRatio)
+	rightWidth := m.width - navWidth
+
+	contentWidth := int(float64(rightWidth) * (config.ContentWidthRatio / (config.ContentWidthRatio + config.DetailWidthRatio)))
+	detailWidth := rightWidth - contentWidth
+
+	// Render panels
+	navPanel := m.renderNavigatorPanel(navWidth, contentHeight)
+	contentPanel := m.renderContentPanel(contentWidth, contentHeight)
+	detailPanel := m.renderDetailPanel(detailWidth, contentHeight)
+
+	// Combine right side
+	rightSide := lipgloss.JoinHorizontal(lipgloss.Top, contentPanel, detailPanel)
+
+	// Combine all
+	main := lipgloss.JoinHorizontal(lipgloss.Top, navPanel, rightSide)
+	statusBar := m.renderStatusBar()
+
 	return main + "\n" + statusBar
 }
 
-func (m *MainScreen) renderGroupsPanel(width, height int) string {
+func (m *MainScreen) renderNavigatorPanel(width, height int) string {
 	var content strings.Builder
 
-	if m.loading && len(m.groups) == 0 {
+	if m.loading && len(m.treeNodes) == 0 {
 		content.WriteString(m.loadingMsg)
-	} else if len(m.groups) == 0 {
-		content.WriteString(styles.DimmedText.Render("No groups"))
+	} else if len(m.treeNodes) == 0 {
+		content.WriteString(styles.DimmedText.Render("No groups or projects"))
 	} else {
-		for i, g := range m.groups {
-			line := g.Name
-			if i == m.selectedGroupIdx {
+		// Calculate visible area for scrolling
+		visibleLines := height - config.BorderSize - 2 // account for borders and padding
+		if visibleLines < 1 {
+			visibleLines = 10
+		}
+
+		// Calculate scroll offset to keep selected item visible
+		scrollOffset := 0
+		if m.selectedNodeIdx >= visibleLines {
+			scrollOffset = m.selectedNodeIdx - visibleLines + 1
+		}
+		endIdx := scrollOffset + visibleLines
+		if endIdx > len(m.treeNodes) {
+			endIdx = len(m.treeNodes)
+		}
+
+		for i := scrollOffset; i < endIdx; i++ {
+			node := m.treeNodes[i]
+
+			// Build indent based on depth
+			indent := strings.Repeat("  ", node.Depth)
+
+			// Build icon
+			icon := ""
+			if node.Type == "group" {
+				if m.expandedGroups[node.ID] {
+					icon = "▼ "
+				} else {
+					icon = "▶ "
+				}
+			} else {
+				icon = "  📦 "
+			}
+
+			line := indent + icon + node.Name
+
+			// Truncate if too long
+			maxLineLen := width - config.BorderSize - 4
+			if maxLineLen > 0 && len(line) > maxLineLen {
+				line = line[:maxLineLen-1] + "…"
+			}
+
+			if i == m.selectedNodeIdx {
 				line = styles.SelectedItem.Render("> " + line)
 			} else {
 				line = styles.NormalItem.Render("  " + line)
 			}
 			content.WriteString(line + "\n")
 		}
-	}
 
-	return components.SimpleBorderedPanel("Groups", content.String(), width, height, m.focusedPanel == PanelGroups)
-}
-
-func (m *MainScreen) renderProjectsPanel(width, height int) string {
-	var content strings.Builder
-
-	if m.loading && len(m.projects) == 0 {
-		content.WriteString(m.loadingMsg)
-	} else {
-		for i, p := range m.projects {
-			line := p.Name
-			if i == m.selectedProjectIdx {
-				line = styles.SelectedItem.Render("> " + line)
-			} else {
-				line = styles.NormalItem.Render("  " + line)
-			}
-			content.WriteString(line + "\n")
+		// Show scroll indicator
+		if len(m.treeNodes) > visibleLines {
+			content.WriteString(styles.DimmedText.Render(fmt.Sprintf("\n[%d/%d]", m.selectedNodeIdx+1, len(m.treeNodes))))
 		}
 	}
 
-	return components.SimpleBorderedPanel("Projects", content.String(), width, height, m.focusedPanel == PanelProjects)
+	return components.SimpleBorderedPanel("Navigator", content.String(), width, height, m.focusedPanel == PanelNavigator)
 }
 
 func (m *MainScreen) renderContentPanel(width, height int) string {
@@ -1295,8 +1436,8 @@ func (m *MainScreen) renderContentPanel(width, height int) string {
 	listHeight := height
 	readmeHeight := 0
 	if showReadme {
-		listHeight = height / 2
-		readmeHeight = height - listHeight
+		readmeHeight = int(float64(height) * config.ReadmeHeightRatio)
+		listHeight = height - readmeHeight
 	}
 
 	// Build the file/content list panel
@@ -1492,7 +1633,7 @@ func (m *MainScreen) renderReadmeSection(width, height int) string {
 
 	if !m.readmeReady {
 		m.readmeViewport = viewport.New(innerWidth, innerHeight)
-		m.readmeViewport.SetContent(m.readmeContent)
+		m.readmeViewport.SetContent(m.readmeRendered)
 		m.readmeReady = true
 	} else {
 		m.readmeViewport.Width = innerWidth
@@ -1807,11 +1948,10 @@ func (m *MainScreen) renderStatusBar() string {
 		key  string
 		name string
 	}{
-		{PanelGroups, "1", "groups"},
-		{PanelProjects, "2", "projects"},
-		{PanelContent, "3", "files"},
-		{PanelReadme, "4", "readme"},
-		{PanelDetail, "5", "detail"},
+		{PanelNavigator, "1", "navigator"},
+		{PanelContent, "2", "content"},
+		{PanelReadme, "3", "readme"},
+		{PanelDetail, "4", "detail"},
 	}
 
 	var parts []string
