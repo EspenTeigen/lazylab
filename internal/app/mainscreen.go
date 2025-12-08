@@ -1,19 +1,158 @@
 package app
 
 import (
+	"bytes"
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"regexp"
+	"runtime"
 	"strings"
 
+	"github.com/alecthomas/chroma/v2"
+	"github.com/alecthomas/chroma/v2/formatters"
+	"github.com/alecthomas/chroma/v2/lexers"
+	chromaStyles "github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/espen/lazylab/internal/config"
 	"github.com/espen/lazylab/internal/gitlab"
 	"github.com/espen/lazylab/internal/keymap"
 	"github.com/espen/lazylab/internal/ui/components"
 	"github.com/espen/lazylab/internal/ui/styles"
 )
+
+// copyToClipboard copies text to the system clipboard
+func copyToClipboard(text string) error {
+	var cmd *exec.Cmd
+
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("pbcopy")
+	case "linux":
+		// Try xclip first, fall back to xsel
+		if _, err := exec.LookPath("xclip"); err == nil {
+			cmd = exec.Command("xclip", "-selection", "clipboard")
+		} else {
+			cmd = exec.Command("xsel", "--clipboard", "--input")
+		}
+	case "windows":
+		cmd = exec.Command("clip")
+	default:
+		return fmt.Errorf("unsupported platform")
+	}
+
+	pipe, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	_, err = pipe.Write([]byte(text))
+	if err != nil {
+		return err
+	}
+
+	pipe.Close()
+	return cmd.Wait()
+}
+
+// ansiRegex matches ANSI escape sequences
+var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+// highlightCode applies syntax highlighting to code based on filename
+func highlightCode(code, filename string) string {
+	// Get lexer based on filename
+	lexer := lexers.Match(filename)
+	if lexer == nil {
+		lexer = lexers.Analyse(code)
+	}
+	if lexer == nil {
+		lexer = lexers.Fallback
+	}
+	lexer = chroma.Coalesce(lexer)
+
+	// Use a dark terminal-friendly style
+	style := chromaStyles.Get("monokai")
+	if style == nil {
+		style = chromaStyles.Fallback
+	}
+
+	// Use terminal256 formatter for ANSI output
+	formatter := formatters.Get("terminal256")
+	if formatter == nil {
+		formatter = formatters.Fallback
+	}
+
+	iterator, err := lexer.Tokenise(nil, code)
+	if err != nil {
+		return code
+	}
+
+	var buf bytes.Buffer
+	err = formatter.Format(&buf, style, iterator)
+	if err != nil {
+		return code
+	}
+
+	return buf.String()
+}
+
+// getFileExtension returns the extension of a file path
+func getFileExtension(path string) string {
+	return filepath.Ext(path)
+}
+
+// stripANSI removes ANSI escape codes from a string
+func stripANSI(s string) string {
+	return ansiRegex.ReplaceAllString(s, "")
+}
+
+// wrapText wraps all lines in text to fit within maxWidth
+func wrapText(text string, maxWidth int) string {
+	if maxWidth <= 0 {
+		return text
+	}
+
+	lines := strings.Split(text, "\n")
+	var result []string
+
+	for _, line := range lines {
+		if len(line) <= maxWidth {
+			result = append(result, line)
+			continue
+		}
+
+		// Wrap long line
+		remaining := line
+		for len(remaining) > maxWidth {
+			// Find break point
+			breakAt := maxWidth
+			for i := maxWidth; i > maxWidth/2; i-- {
+				if remaining[i] == ' ' {
+					breakAt = i
+					break
+				}
+			}
+			result = append(result, remaining[:breakAt])
+			remaining = remaining[breakAt:]
+			if len(remaining) > 0 && remaining[0] == ' ' {
+				remaining = remaining[1:]
+			}
+		}
+		if len(remaining) > 0 {
+			result = append(result, remaining)
+		}
+	}
+
+	return strings.Join(result, "\n")
+}
 
 // PanelID identifies panels in the UI
 type PanelID int
@@ -34,11 +173,10 @@ const (
 	TabFiles ContentTab = iota
 	TabMRs
 	TabPipelines
-	TabBranches
 	TabCount
 )
 
-var contentTabNames = []string{"Files", "MRs", "Pipelines", "Branches"}
+var contentTabNames = []string{"Files", "MRs", "Pipelines"}
 
 // MainScreen is the lazygit-style multi-panel interface
 type MainScreen struct {
@@ -49,24 +187,32 @@ type MainScreen struct {
 	groupPath string
 
 	// Data
+	groups        []gitlab.Group
 	projects      []gitlab.Project
 	files         []gitlab.TreeEntry
 	mergeRequests []gitlab.MergeRequest
 	pipelines     []gitlab.Pipeline
 	branches      []gitlab.Branch
+	jobs          []gitlab.Job
+	jobLog        string
+
+	// Jobs per pipeline (for showing stages in list)
+	pipelineJobs map[int][]gitlab.Job
 
 	// Selected project
 	selectedProject *gitlab.Project
 
 	// File browser state
-	currentPath   []string
-	fileContent   string
-	readmeContent string
+	currentPath    []string
+	fileContent    string
+	readmeContent  string
+	viewingFile    bool
+	viewingFilePath string
 
 	// Selection indices
-	selectedGroup   int
+	selectedGroupIdx   int
 	selectedProjectIdx int
-	selectedContent int
+	selectedContent    int
 
 	// Focus
 	focusedPanel PanelID
@@ -89,20 +235,69 @@ type MainScreen struct {
 	// Viewports for scrolling
 	readmeViewport  viewport.Model
 	detailViewport  viewport.Model
+	jobLogViewport  viewport.Model
+	fileViewport    viewport.Model
 	readmeReady     bool
 	detailReady     bool
+	jobLogReady     bool
+	fileViewReady   bool
+
+	// Job selection for pipelines
+	selectedJobIdx int
 
 	// Scroll offset for file list (keeps selected item visible)
 	fileScrollOffset int
+
+	// Job log popup
+	showJobLogPopup bool
+
+	// Branch selector popup
+	showBranchPopup  bool
+	selectedBranchIdx int
+	currentBranch    string
+
+	// Status message (for clipboard feedback etc)
+	statusMsg     string
+	statusMsgTime int
+
+	// Error handling
+	lastError     string
+	lastErrorTime int
+	retryCmd      tea.Cmd // Command to retry on 'r' key
 }
 
 // NewMainScreen creates a new main screen
 func NewMainScreen() *MainScreen {
-	// Check for GITLAB_TOKEN env var
+	// Priority: env vars > glab config > defaults
 	token := os.Getenv("GITLAB_TOKEN")
 	host := os.Getenv("GITLAB_HOST")
+	groupPath := os.Getenv("GITLAB_GROUP")
+
+	// Try to load glab config if env vars not set
+	if token == "" || host == "" {
+		if glabConfig, err := config.LoadGlabConfig(); err == nil {
+			if host == "" {
+				host = glabConfig.GetDefaultHost()
+			}
+			if hostConfig := glabConfig.GetHostConfig(host); hostConfig != nil {
+				if token == "" {
+					token = hostConfig.Token
+				}
+			}
+		}
+	}
+
+	// Apply defaults
 	if host == "" {
-		host = "https://gitlab.com"
+		host = "gitlab.com"
+	}
+	if groupPath == "" {
+		groupPath = "gitlab-org"
+	}
+
+	// Build the full URL if needed
+	if host != "" && !strings.HasPrefix(host, "http") {
+		host = "https://" + host
 	}
 
 	var client *gitlab.Client
@@ -110,12 +305,6 @@ func NewMainScreen() *MainScreen {
 		client = gitlab.NewClient(host, token)
 	} else {
 		client = gitlab.NewPublicClient()
-	}
-
-	// Default to gitlab-org for testing (has MRs, pipelines, etc.)
-	groupPath := os.Getenv("GITLAB_GROUP")
-	if groupPath == "" {
-		groupPath = "gitlab-org"
 	}
 
 	return &MainScreen{
@@ -130,13 +319,33 @@ func NewMainScreen() *MainScreen {
 // Init initializes the screen
 func (m *MainScreen) Init() tea.Cmd {
 	m.loading = true
-	m.loadingMsg = "Loading projects..."
-	return m.loadProjects()
+	m.loadingMsg = "Loading groups..."
+	cmd := m.loadGroups()
+	m.retryCmd = cmd
+	return cmd
+}
+
+func (m *MainScreen) loadGroups() tea.Cmd {
+	return func() tea.Msg {
+		groups, err := m.client.ListGroups()
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return groupsLoadedMsg{groups: groups}
+	}
 }
 
 func (m *MainScreen) loadProjects() tea.Cmd {
 	return func() tea.Msg {
-		projects, err := m.client.ListGroupProjects(m.groupPath)
+		var projects []gitlab.Project
+		var err error
+
+		if m.groupPath != "" {
+			projects, err = m.client.ListGroupProjects(m.groupPath)
+		} else {
+			projects, err = m.client.ListProjects()
+		}
+
 		if err != nil {
 			return errMsg{err: err}
 		}
@@ -148,14 +357,21 @@ func (m *MainScreen) loadProjectContent() tea.Cmd {
 	if m.selectedProject == nil {
 		return nil
 	}
-	projectID := fmt.Sprintf("%d", m.selectedProject.ID)
 	ref := m.selectedProject.DefaultBranch
 	if ref == "" {
 		ref = "main"
 	}
+	return m.loadProjectContentForBranch(ref)
+}
+
+func (m *MainScreen) loadProjectContentForBranch(branch string) tea.Cmd {
+	if m.selectedProject == nil {
+		return nil
+	}
+	projectID := fmt.Sprintf("%d", m.selectedProject.ID)
 
 	return func() tea.Msg {
-		entries, err := m.client.GetTree(projectID, ref, "")
+		entries, err := m.client.GetTree(projectID, branch, "")
 		if err != nil {
 			return errMsg{err: err}
 		}
@@ -165,7 +381,7 @@ func (m *MainScreen) loadProjectContent() tea.Cmd {
 		for _, e := range entries {
 			lower := strings.ToLower(e.Name)
 			if strings.HasPrefix(lower, "readme") {
-				content, err := m.client.GetFileContent(projectID, e.Path, ref)
+				content, err := m.client.GetFileContent(projectID, e.Path, branch)
 				if err == nil {
 					readme = content
 				}
@@ -182,7 +398,10 @@ func (m *MainScreen) loadDirectory(path string) tea.Cmd {
 		return nil
 	}
 	projectID := fmt.Sprintf("%d", m.selectedProject.ID)
-	ref := m.selectedProject.DefaultBranch
+	ref := m.currentBranch
+	if ref == "" {
+		ref = m.selectedProject.DefaultBranch
+	}
 	if ref == "" {
 		ref = "main"
 	}
@@ -201,7 +420,10 @@ func (m *MainScreen) loadFile(filePath string) tea.Cmd {
 		return nil
 	}
 	projectID := fmt.Sprintf("%d", m.selectedProject.ID)
-	ref := m.selectedProject.DefaultBranch
+	ref := m.currentBranch
+	if ref == "" {
+		ref = m.selectedProject.DefaultBranch
+	}
 	if ref == "" {
 		ref = "main"
 	}
@@ -257,8 +479,52 @@ func (m *MainScreen) loadBranches() tea.Cmd {
 	}
 }
 
+func (m *MainScreen) loadPipelineJobs(pipelineID int) tea.Cmd {
+	if m.selectedProject == nil {
+		return nil
+	}
+	projectID := fmt.Sprintf("%d", m.selectedProject.ID)
+	return func() tea.Msg {
+		jobs, err := m.client.ListPipelineJobs(projectID, pipelineID)
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return jobsLoadedMsg{jobs: jobs}
+	}
+}
+
+func (m *MainScreen) loadPipelineJobsForList(pipelineID int) tea.Cmd {
+	if m.selectedProject == nil {
+		return nil
+	}
+	projectID := fmt.Sprintf("%d", m.selectedProject.ID)
+	return func() tea.Msg {
+		jobs, err := m.client.ListPipelineJobs(projectID, pipelineID)
+		if err != nil {
+			// Silently ignore errors for list view
+			return pipelineJobsLoadedMsg{pipelineID: pipelineID, jobs: nil}
+		}
+		return pipelineJobsLoadedMsg{pipelineID: pipelineID, jobs: jobs}
+	}
+}
+
+func (m *MainScreen) loadJobLog(jobID int) tea.Cmd {
+	if m.selectedProject == nil {
+		return nil
+	}
+	projectID := fmt.Sprintf("%d", m.selectedProject.ID)
+	return func() tea.Msg {
+		log, err := m.client.GetJobLog(projectID, jobID)
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return jobLogLoadedMsg{log: log}
+	}
+}
+
 // Messages
 type errMsg struct{ err error }
+type groupsLoadedMsg struct{ groups []gitlab.Group }
 type projectsLoadedMsg struct{ projects []gitlab.Project }
 type projectContentMsg struct {
 	entries []gitlab.TreeEntry
@@ -275,6 +541,12 @@ type fileContentMsg struct {
 type mrsLoadedMsg struct{ mrs []gitlab.MergeRequest }
 type pipelinesLoadedMsg struct{ pipelines []gitlab.Pipeline }
 type branchesLoadedMsg struct{ branches []gitlab.Branch }
+type jobsLoadedMsg struct{ jobs []gitlab.Job }
+type jobLogLoadedMsg struct{ log string }
+type pipelineJobsLoadedMsg struct {
+	pipelineID int
+	jobs       []gitlab.Job
+}
 
 // Update handles messages
 func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -286,12 +558,29 @@ func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case errMsg:
 		m.loading = false
-		m.errMsg = msg.err.Error()
+		m.lastError = msg.err.Error()
+		// Don't set m.errMsg - that would crash the UI
+		// Instead show error in status bar and allow retry
+		return m, nil
+
+	case groupsLoadedMsg:
+		m.groups = msg.groups
+		m.loading = false
+		m.lastError = "" // Clear any previous error
+		// If no groups, load all projects directly
+		if len(m.groups) == 0 {
+			m.loading = true
+			m.loadingMsg = "Loading projects..."
+			cmd := m.loadProjects()
+			m.retryCmd = cmd
+			return m, cmd
+		}
 		return m, nil
 
 	case projectsLoadedMsg:
 		m.projects = msg.projects
 		m.loading = false
+		m.lastError = ""
 		return m, nil
 
 	case projectContentMsg:
@@ -302,6 +591,14 @@ func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.fileScrollOffset = 0
 		m.readmeReady = false // Reset to reinitialize viewport with new content
 		m.loading = false
+		m.lastError = ""
+		// Set current branch if not set
+		if m.currentBranch == "" && m.selectedProject != nil {
+			m.currentBranch = m.selectedProject.DefaultBranch
+			if m.currentBranch == "" {
+				m.currentBranch = "main"
+			}
+		}
 		return m, nil
 
 	case treeLoadedMsg:
@@ -310,12 +607,16 @@ func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.fileScrollOffset = 0
 		m.fileContent = ""
 		m.loading = false
+		m.lastError = ""
 		return m, nil
 
 	case fileContentMsg:
 		m.fileContent = msg.content
-		m.detailReady = false // Reset to reinitialize viewport with new content
+		m.viewingFile = true
+		m.viewingFilePath = msg.path
+		m.fileViewReady = false // Reset to reinitialize viewport with new content
 		m.loading = false
+		m.lastError = ""
 		return m, nil
 
 	case mrsLoadedMsg:
@@ -323,13 +624,28 @@ func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.selectedContent = 0
 		m.fileScrollOffset = 0
 		m.loading = false
+		m.lastError = ""
 		return m, nil
 
 	case pipelinesLoadedMsg:
 		m.pipelines = msg.pipelines
 		m.selectedContent = 0
 		m.fileScrollOffset = 0
+		m.pipelineJobs = make(map[int][]gitlab.Job)
 		m.loading = false
+		m.lastError = ""
+		// Load jobs for each pipeline to show stages
+		var cmds []tea.Cmd
+		for _, p := range m.pipelines {
+			cmds = append(cmds, m.loadPipelineJobsForList(p.ID))
+		}
+		return m, tea.Batch(cmds...)
+
+	case pipelineJobsLoadedMsg:
+		if m.pipelineJobs == nil {
+			m.pipelineJobs = make(map[int][]gitlab.Job)
+		}
+		m.pipelineJobs[msg.pipelineID] = msg.jobs
 		return m, nil
 
 	case branchesLoadedMsg:
@@ -337,6 +653,41 @@ func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.selectedContent = 0
 		m.fileScrollOffset = 0
 		m.loading = false
+		m.lastError = ""
+		// If branch popup is open, keep it open
+		if m.showBranchPopup {
+			// Find current branch in list
+			for i, br := range m.branches {
+				if br.Name == m.currentBranch {
+					m.selectedBranchIdx = i
+					break
+				}
+			}
+		}
+		return m, nil
+
+	case jobsLoadedMsg:
+		m.jobs = msg.jobs
+		m.selectedJobIdx = 0
+		m.jobLog = ""
+		m.jobLogReady = false
+		m.loading = false
+		m.lastError = ""
+		// Auto-load first job's log if available
+		if len(m.jobs) > 0 {
+			m.loading = true
+			m.loadingMsg = "Loading job log..."
+			cmd := m.loadJobLog(m.jobs[0].ID)
+			m.retryCmd = cmd
+			return m, cmd
+		}
+		return m, nil
+
+	case jobLogLoadedMsg:
+		m.jobLog = msg.log
+		m.jobLogReady = false
+		m.loading = false
+		m.lastError = ""
 		return m, nil
 
 	case tea.KeyMsg:
@@ -347,8 +698,54 @@ func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *MainScreen) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Handle popups first
+	if m.showJobLogPopup {
+		return m.handleJobLogPopup(msg)
+	}
+	if m.showBranchPopup {
+		return m.handleBranchPopup(msg)
+	}
+
 	if key.Matches(msg, m.keymap.Quit) {
 		return m, tea.Quit
+	}
+
+	// Clear error on Escape
+	if msg.String() == "esc" || msg.String() == "escape" {
+		if m.lastError != "" {
+			m.lastError = ""
+			return m, nil
+		}
+	}
+
+	// Retry on 'r' key if there's an error
+	if msg.String() == "r" && m.lastError != "" && m.retryCmd != nil {
+		m.lastError = ""
+		m.loading = true
+		m.loadingMsg = "Retrying..."
+		cmd := m.retryCmd
+		return m, cmd
+	}
+
+	// 'b' to open branch selector (when viewing files)
+	if msg.String() == "b" && m.selectedProject != nil && m.contentTab == TabFiles {
+		m.showBranchPopup = true
+		m.selectedBranchIdx = 0
+		// Find current branch in list
+		for i, br := range m.branches {
+			if br.Name == m.currentBranch {
+				m.selectedBranchIdx = i
+				break
+			}
+		}
+		if len(m.branches) == 0 {
+			m.loading = true
+			m.loadingMsg = "Loading branches..."
+			cmd := m.loadBranches()
+			m.retryCmd = cmd
+			return m, cmd
+		}
+		return m, nil
 	}
 
 	// Panel navigation with Shift+HJKL
@@ -424,14 +821,26 @@ func (m *MainScreen) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *MainScreen) handleGroupsNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, m.keymap.Down):
-		if m.selectedGroup < 0 {
-			m.selectedGroup++
+		if m.selectedGroupIdx < len(m.groups)-1 {
+			m.selectedGroupIdx++
 		}
 	case key.Matches(msg, m.keymap.Up):
-		if m.selectedGroup > 0 {
-			m.selectedGroup--
+		if m.selectedGroupIdx > 0 {
+			m.selectedGroupIdx--
 		}
 	case key.Matches(msg, m.keymap.Right), key.Matches(msg, m.keymap.Select):
+		// Select group and load its projects
+		if m.selectedGroupIdx < len(m.groups) {
+			m.groupPath = m.groups[m.selectedGroupIdx].FullPath
+			m.projects = nil
+			m.selectedProjectIdx = 0
+			m.loading = true
+			m.loadingMsg = "Loading projects..."
+			m.focusedPanel = PanelProjects
+			cmd := m.loadProjects()
+			m.retryCmd = cmd
+			return m, cmd
+		}
 		m.focusedPanel = PanelProjects
 	}
 	return m, nil
@@ -454,6 +863,7 @@ func (m *MainScreen) handleProjectsNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.selectedProjectIdx < len(m.projects) {
 			m.selectedProject = &m.projects[m.selectedProjectIdx]
 			m.currentPath = nil
+			m.currentBranch = ""
 			m.files = nil
 			m.mergeRequests = nil
 			m.pipelines = nil
@@ -464,21 +874,33 @@ func (m *MainScreen) handleProjectsNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.loading = true
 			m.loadingMsg = "Loading repository..."
 			m.focusedPanel = PanelContent
-			return m, m.loadProjectContent()
+			cmd := m.loadProjectContent()
+			m.retryCmd = cmd
+			return m, cmd
 		}
 	}
 	return m, nil
 }
 
 func (m *MainScreen) handleContentNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Handle escape for going back in directory
+	// Handle escape for going back
 	if msg.String() == "esc" || msg.String() == "escape" {
+		// If viewing a file, go back to file list
+		if m.viewingFile {
+			m.viewingFile = false
+			m.fileContent = ""
+			m.viewingFilePath = ""
+			return m, nil
+		}
+		// If in a directory, go up
 		if m.contentTab == TabFiles && len(m.currentPath) > 0 {
 			m.currentPath = m.currentPath[:len(m.currentPath)-1]
 			m.loading = true
 			m.loadingMsg = "Loading..."
 			path := strings.Join(m.currentPath, "/")
-			return m, m.loadDirectory(path)
+			cmd := m.loadDirectory(path)
+			m.retryCmd = cmd
+			return m, cmd
 		}
 		// If at root, go back to projects
 		m.focusedPanel = PanelProjects
@@ -496,7 +918,7 @@ func (m *MainScreen) handleContentNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keymap.Right):
 		// l - switch to next tab
-		if m.contentTab < TabBranches {
+		if m.contentTab < TabPipelines {
 			return m, m.switchTab(m.contentTab + 1)
 		}
 		// At last tab, go to detail panel
@@ -510,34 +932,77 @@ func (m *MainScreen) handleContentNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.currentPath = append(m.currentPath, entry.Name)
 				m.loading = true
 				m.loadingMsg = "Loading..."
-				return m, m.loadDirectory(entry.Path)
+				cmd := m.loadDirectory(entry.Path)
+				m.retryCmd = cmd
+				return m, cmd
 			} else {
 				m.loading = true
 				m.loadingMsg = "Loading file..."
-				return m, m.loadFile(entry.Path)
+				cmd := m.loadFile(entry.Path)
+				m.retryCmd = cmd
+				return m, cmd
 			}
+		}
+		// Load jobs for selected pipeline and show popup
+		if m.contentTab == TabPipelines && m.selectedContent < len(m.pipelines) {
+			pipeline := m.pipelines[m.selectedContent]
+			m.jobs = nil
+			m.jobLog = ""
+			m.showJobLogPopup = true
+			m.loading = true
+			m.loadingMsg = "Loading jobs..."
+			cmd := m.loadPipelineJobs(pipeline.ID)
+			m.retryCmd = cmd
+			return m, cmd
 		}
 		// For other tabs, focus detail panel
 		m.focusedPanel = PanelDetail
 
 	case key.Matches(msg, m.keymap.Down):
+		// If viewing file, scroll down
+		if m.viewingFile {
+			m.fileViewport.LineDown(1)
+			return m, nil
+		}
 		maxItems := m.getContentCount()
 		if m.selectedContent < maxItems-1 {
 			m.selectedContent++
 			if m.contentTab == TabFiles {
 				m.fileContent = ""
+				m.viewingFile = false
 			}
 			m.adjustScrollOffset()
 		}
 	case key.Matches(msg, m.keymap.Up):
+		// If viewing file, scroll up
+		if m.viewingFile {
+			m.fileViewport.LineUp(1)
+			return m, nil
+		}
 		if m.selectedContent > 0 {
 			m.selectedContent--
 			if m.contentTab == TabFiles {
 				m.fileContent = ""
+				m.viewingFile = false
 			}
 			m.adjustScrollOffset()
 		}
 	}
+
+	// Additional scroll keys when viewing file
+	if m.viewingFile {
+		switch msg.String() {
+		case "ctrl+d":
+			m.fileViewport.HalfViewDown()
+		case "ctrl+u":
+			m.fileViewport.HalfViewUp()
+		case "g":
+			m.fileViewport.GotoTop()
+		case "G":
+			m.fileViewport.GotoBottom()
+		}
+	}
+
 	return m, nil
 }
 
@@ -567,7 +1032,6 @@ func (m *MainScreen) handleReadmeNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keymap.Down):
 		m.readmeViewport.LineDown(1)
 	}
-	// Also support vim-style half-page scrolling
 	switch msg.String() {
 	case "ctrl+d":
 		m.readmeViewport.HalfViewDown()
@@ -589,6 +1053,100 @@ func (m *MainScreen) handleDetailNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *MainScreen) handleBranchPopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "esc", "escape":
+		m.showBranchPopup = false
+		return m, nil
+	case "j", "down":
+		if m.selectedBranchIdx < len(m.branches)-1 {
+			m.selectedBranchIdx++
+		}
+	case "k", "up":
+		if m.selectedBranchIdx > 0 {
+			m.selectedBranchIdx--
+		}
+	case "enter":
+		if m.selectedBranchIdx < len(m.branches) {
+			m.currentBranch = m.branches[m.selectedBranchIdx].Name
+			m.showBranchPopup = false
+			// Reload files for new branch
+			m.files = nil
+			m.currentPath = nil
+			m.fileContent = ""
+			m.viewingFile = false
+			m.readmeContent = ""
+			m.loading = true
+			m.loadingMsg = "Loading files..."
+			cmd := m.loadProjectContentForBranch(m.currentBranch)
+			m.retryCmd = cmd
+			return m, cmd
+		}
+	}
+	return m, nil
+}
+
+func (m *MainScreen) handleJobLogPopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "q", "esc", "escape":
+		m.showJobLogPopup = false
+		m.jobs = nil
+		m.jobLog = ""
+		m.statusMsg = ""
+		m.lastError = ""
+		return m, nil
+	case "j", "down":
+		// Next job
+		if m.selectedJobIdx < len(m.jobs)-1 {
+			m.selectedJobIdx++
+			m.jobLog = ""
+			m.jobLogReady = false
+			m.loading = true
+			m.loadingMsg = "Loading job log..."
+			m.statusMsg = ""
+			cmd := m.loadJobLog(m.jobs[m.selectedJobIdx].ID)
+			m.retryCmd = cmd
+			return m, cmd
+		}
+	case "k", "up":
+		// Previous job
+		if m.selectedJobIdx > 0 {
+			m.selectedJobIdx--
+			m.jobLog = ""
+			m.jobLogReady = false
+			m.loading = true
+			m.loadingMsg = "Loading job log..."
+			m.statusMsg = ""
+			cmd := m.loadJobLog(m.jobs[m.selectedJobIdx].ID)
+			m.retryCmd = cmd
+			return m, cmd
+		}
+	case "h", "left":
+		m.jobLogViewport.LineUp(3)
+	case "l", "right":
+		m.jobLogViewport.LineDown(3)
+	case "ctrl+d":
+		m.jobLogViewport.HalfViewDown()
+	case "ctrl+u":
+		m.jobLogViewport.HalfViewUp()
+	case "g":
+		m.jobLogViewport.GotoTop()
+	case "G":
+		m.jobLogViewport.GotoBottom()
+	case "y":
+		// Copy job log to clipboard
+		if m.jobLog != "" {
+			cleanLog := stripANSI(m.jobLog)
+			if err := copyToClipboard(cleanLog); err != nil {
+				m.statusMsg = "Copy failed: " + err.Error()
+			} else {
+				m.statusMsg = "Copied to clipboard!"
+			}
+		}
+	}
+	return m, nil
+}
+
 func (m *MainScreen) switchTab(tab ContentTab) tea.Cmd {
 	m.contentTab = tab
 	m.selectedContent = 0
@@ -604,25 +1162,25 @@ func (m *MainScreen) switchTab(tab ContentTab) tea.Cmd {
 			m.loading = true
 			m.loadingMsg = "Loading files..."
 			m.currentPath = nil
-			return m.loadProjectContent()
+			cmd := m.loadProjectContent()
+			m.retryCmd = cmd
+			return cmd
 		}
 	case TabMRs:
 		if len(m.mergeRequests) == 0 {
 			m.loading = true
 			m.loadingMsg = "Loading merge requests..."
-			return m.loadMRs()
+			cmd := m.loadMRs()
+			m.retryCmd = cmd
+			return cmd
 		}
 	case TabPipelines:
 		if len(m.pipelines) == 0 {
 			m.loading = true
 			m.loadingMsg = "Loading pipelines..."
-			return m.loadPipelines()
-		}
-	case TabBranches:
-		if len(m.branches) == 0 {
-			m.loading = true
-			m.loadingMsg = "Loading branches..."
-			return m.loadBranches()
+			cmd := m.loadPipelines()
+			m.retryCmd = cmd
+			return cmd
 		}
 	}
 	return nil
@@ -636,8 +1194,6 @@ func (m *MainScreen) getContentCount() int {
 		return len(m.mergeRequests)
 	case TabPipelines:
 		return len(m.pipelines)
-	case TabBranches:
-		return len(m.branches)
 	}
 	return 0
 }
@@ -679,20 +1235,35 @@ func (m *MainScreen) View() string {
 	main := lipgloss.JoinHorizontal(lipgloss.Top, leftColumn, rightSide)
 	statusBar := m.renderStatusBar()
 
+	// If popup is shown, render only the popup
+	if m.showJobLogPopup {
+		return m.renderJobLogPopup()
+	}
+	if m.showBranchPopup {
+		return m.renderBranchPopup()
+	}
+
 	return main + "\n" + statusBar
 }
 
 func (m *MainScreen) renderGroupsPanel(width, height int) string {
 	var content strings.Builder
 
-	// Just show the current group for now
-	line := m.groupPath
-	if m.selectedGroup == 0 {
-		line = styles.SelectedItem.Render("> " + line)
+	if m.loading && len(m.groups) == 0 {
+		content.WriteString(m.loadingMsg)
+	} else if len(m.groups) == 0 {
+		content.WriteString(styles.DimmedText.Render("No groups"))
 	} else {
-		line = styles.NormalItem.Render("  " + line)
+		for i, g := range m.groups {
+			line := g.Name
+			if i == m.selectedGroupIdx {
+				line = styles.SelectedItem.Render("> " + line)
+			} else {
+				line = styles.NormalItem.Render("  " + line)
+			}
+			content.WriteString(line + "\n")
+		}
 	}
-	content.WriteString(line + "\n")
 
 	return components.SimpleBorderedPanel("Groups", content.String(), width, height, m.focusedPanel == PanelGroups)
 }
@@ -737,16 +1308,19 @@ func (m *MainScreen) renderContentPanel(width, height int) string {
 
 	// Build the README panel
 	readmePanel := m.renderReadmeSection(width, readmeHeight)
-
 	return lipgloss.JoinVertical(lipgloss.Left, listPanel, readmePanel)
 }
 
 func (m *MainScreen) renderListSection(width, height int) string {
 	var content strings.Builder
 
-	// Project header
+	// Project header with branch
 	if m.selectedProject != nil {
-		content.WriteString(styles.SelectedItem.Render(m.selectedProject.Name) + "\n")
+		projectHeader := styles.SelectedItem.Render(m.selectedProject.Name)
+		if m.currentBranch != "" {
+			projectHeader += styles.DimmedText.Render(" (" + m.currentBranch + ")")
+		}
+		content.WriteString(projectHeader + "\n")
 	}
 
 	// Tab header
@@ -779,27 +1353,52 @@ func (m *MainScreen) renderListSection(width, height int) string {
 
 		switch m.contentTab {
 		case TabFiles:
-			endIdx := m.fileScrollOffset + visibleLines
-			if endIdx > len(m.files) {
-				endIdx = len(m.files)
-			}
-			for i := m.fileScrollOffset; i < endIdx; i++ {
-				f := m.files[i]
-				icon := "📄"
-				if f.Type == "tree" {
-					icon = "📁"
+			// If viewing a file, show its content
+			if m.viewingFile && m.fileContent != "" {
+				// Show file path
+				content.WriteString(styles.DimmedText.Render(m.viewingFilePath) + "\n")
+				content.WriteString(styles.DimmedText.Render("Esc: back | j/k: scroll | g/G: top/bottom") + "\n\n")
+
+				// Use viewport for file content
+				fileViewHeight := visibleLines - 3
+				innerWidth := width - 4
+				if !m.fileViewReady {
+					m.fileViewport = viewport.New(innerWidth, fileViewHeight)
+					// Apply syntax highlighting
+					highlighted := highlightCode(m.fileContent, m.viewingFilePath)
+					m.fileViewport.SetContent(highlighted)
+					m.fileViewReady = true
 				}
-				line := fmt.Sprintf("%s %s", icon, f.Name)
-				if i == m.selectedContent {
-					line = styles.SelectedItem.Render("> " + line)
-				} else {
-					line = "  " + line
+				content.WriteString(m.fileViewport.View())
+
+				// Scroll indicator
+				if m.fileViewport.TotalLineCount() > fileViewHeight {
+					content.WriteString(styles.DimmedText.Render(fmt.Sprintf("\n[%d%%]", int(m.fileViewport.ScrollPercent()*100))))
 				}
-				content.WriteString(line + "\n")
-			}
-			// Show scroll indicator
-			if len(m.files) > visibleLines {
-				content.WriteString(styles.DimmedText.Render(fmt.Sprintf("\n[%d/%d]", m.selectedContent+1, len(m.files))))
+			} else {
+				// Show file list
+				endIdx := m.fileScrollOffset + visibleLines
+				if endIdx > len(m.files) {
+					endIdx = len(m.files)
+				}
+				for i := m.fileScrollOffset; i < endIdx; i++ {
+					f := m.files[i]
+					icon := "📄"
+					if f.Type == "tree" {
+						icon = "📁"
+					}
+					line := fmt.Sprintf("%s %s", icon, f.Name)
+					if i == m.selectedContent {
+						line = styles.SelectedItem.Render("> " + line)
+					} else {
+						line = "  " + line
+					}
+					content.WriteString(line + "\n")
+				}
+				// Show scroll indicator
+				if len(m.files) > visibleLines {
+					content.WriteString(styles.DimmedText.Render(fmt.Sprintf("\n[%d/%d]", m.selectedContent+1, len(m.files))))
+				}
 			}
 		case TabMRs:
 			endIdx := m.fileScrollOffset + visibleLines
@@ -834,7 +1433,39 @@ func (m *MainScreen) renderListSection(width, height int) string {
 				p := m.pipelines[i]
 				icon := styles.PipelineIcon(p.Status)
 				statusStyle := styles.PipelineStatus(p.Status)
-				line := fmt.Sprintf("%s #%d %s", statusStyle.Render(icon), p.IID, p.Ref)
+
+				// Build job stages icons
+				stagesStr := ""
+				if jobs, ok := m.pipelineJobs[p.ID]; ok && len(jobs) > 0 {
+					// Group jobs by stage and get stage status
+					stageOrder := []string{}
+					stageStatus := make(map[string]string)
+					for _, job := range jobs {
+						if _, exists := stageStatus[job.Stage]; !exists {
+							stageOrder = append(stageOrder, job.Stage)
+							stageStatus[job.Stage] = job.Status
+						} else {
+							// If any job in stage failed, stage is failed
+							current := stageStatus[job.Stage]
+							if job.Status == "failed" {
+								stageStatus[job.Stage] = "failed"
+							} else if job.Status == "running" && current != "failed" {
+								stageStatus[job.Stage] = "running"
+							} else if job.Status == "pending" && current != "failed" && current != "running" {
+								stageStatus[job.Stage] = "pending"
+							}
+						}
+					}
+					// Build stage icons
+					for _, stage := range stageOrder {
+						status := stageStatus[stage]
+						stageIcon := styles.PipelineIcon(status)
+						stageStyle := styles.PipelineStatus(status)
+						stagesStr += stageStyle.Render(stageIcon) + " "
+					}
+				}
+
+				line := fmt.Sprintf("%s #%d %s %s", statusStyle.Render(icon), p.IID, p.Ref, stagesStr)
 				if i == m.selectedContent {
 					line = styles.SelectedItem.Render("> ") + line
 				} else {
@@ -846,30 +1477,6 @@ func (m *MainScreen) renderListSection(width, height int) string {
 				content.WriteString(styles.DimmedText.Render("No pipelines"))
 			} else if len(m.pipelines) > visibleLines {
 				content.WriteString(styles.DimmedText.Render(fmt.Sprintf("\n[%d/%d]", m.selectedContent+1, len(m.pipelines))))
-			}
-		case TabBranches:
-			endIdx := m.fileScrollOffset + visibleLines
-			if endIdx > len(m.branches) {
-				endIdx = len(m.branches)
-			}
-			for i := m.fileScrollOffset; i < endIdx; i++ {
-				b := m.branches[i]
-				icon := "○"
-				if b.Default {
-					icon = "●"
-				}
-				line := fmt.Sprintf("%s %s", icon, b.Name)
-				if i == m.selectedContent {
-					line = styles.SelectedItem.Render("> ") + line
-				} else {
-					line = "  " + line
-				}
-				content.WriteString(line + "\n")
-			}
-			if len(m.branches) == 0 {
-				content.WriteString(styles.DimmedText.Render("No branches"))
-			} else if len(m.branches) > visibleLines {
-				content.WriteString(styles.DimmedText.Render(fmt.Sprintf("\n[%d/%d]", m.selectedContent+1, len(m.branches))))
 			}
 		}
 	}
@@ -905,30 +1512,137 @@ func (m *MainScreen) renderReadmeSection(width, height int) string {
 	return components.SimpleBorderedPanel("README", content.String(), width, height, m.focusedPanel == PanelReadme)
 }
 
+func (m *MainScreen) renderJobLogPopup() string {
+	// Use full screen
+	popupWidth := m.width
+	popupHeight := m.height - 1
+
+	// Split: left panel for job list, right panel for log
+	jobListWidth := 30
+	logWidth := popupWidth - jobListWidth
+
+	// Render job list panel
+	var jobList strings.Builder
+	for i, job := range m.jobs {
+		icon := styles.PipelineIcon(job.Status)
+		statusStyle := styles.PipelineStatus(job.Status)
+
+		// Format: icon stage/name
+		line := fmt.Sprintf("%s %s", icon, job.Name)
+		if job.Stage != "" && job.Stage != job.Name {
+			line = fmt.Sprintf("%s %s:%s", icon, job.Stage, job.Name)
+		}
+
+		// Truncate if too long
+		if len(line) > jobListWidth-4 {
+			line = line[:jobListWidth-5] + "…"
+		}
+
+		if i == m.selectedJobIdx {
+			jobList.WriteString(styles.SelectedItem.Render("> " + statusStyle.Render(line)))
+		} else {
+			jobList.WriteString("  " + statusStyle.Render(line))
+		}
+		jobList.WriteString("\n")
+	}
+
+	jobPanel := components.SimpleBorderedPanel(
+		fmt.Sprintf("Jobs (%d)", len(m.jobs)),
+		jobList.String(),
+		jobListWidth,
+		popupHeight,
+		true,
+	)
+
+	// Render log panel
+	logInnerWidth := logWidth - 2
+	logInnerHeight := popupHeight - 2
+
+	var logContent strings.Builder
+	if m.jobLog == "" {
+		if m.loading {
+			logContent.WriteString(m.loadingMsg)
+		} else {
+			logContent.WriteString(styles.DimmedText.Render("Select a job to view log"))
+		}
+	} else {
+		if !m.jobLogReady || m.jobLogViewport.Width != logInnerWidth || m.jobLogViewport.Height != logInnerHeight {
+			m.jobLogViewport = viewport.New(logInnerWidth, logInnerHeight)
+			cleanLog := stripANSI(m.jobLog)
+			wrappedLog := wrapText(cleanLog, logInnerWidth)
+			m.jobLogViewport.SetContent(wrappedLog)
+			m.jobLogReady = true
+		}
+		logContent.WriteString(m.jobLogViewport.View())
+	}
+
+	// Build log title with job info
+	logTitle := "Log"
+	if m.selectedJobIdx < len(m.jobs) {
+		job := m.jobs[m.selectedJobIdx]
+		duration := ""
+		if job.Duration > 0 {
+			duration = fmt.Sprintf(" (%.1fs)", job.Duration)
+		}
+		logTitle = fmt.Sprintf("%s - %s%s", job.Name, job.Status, duration)
+	}
+
+	logPanel := components.SimpleBorderedPanel(logTitle, logContent.String(), logWidth, popupHeight, false)
+
+	// Join panels horizontally
+	jobLines := strings.Split(jobPanel, "\n")
+	logLines := strings.Split(logPanel, "\n")
+
+	var combined strings.Builder
+	maxLines := len(jobLines)
+	if len(logLines) > maxLines {
+		maxLines = len(logLines)
+	}
+
+	for i := 0; i < maxLines; i++ {
+		jobLine := ""
+		logLine := ""
+		if i < len(jobLines) {
+			jobLine = jobLines[i]
+		}
+		if i < len(logLines) {
+			logLine = logLines[i]
+		}
+		combined.WriteString(jobLine + logLine + "\n")
+	}
+
+	// Status bar
+	scrollInfo := ""
+	if m.jobLogReady && m.jobLogViewport.TotalLineCount() > logInnerHeight {
+		scrollInfo = fmt.Sprintf(" [%d%%]", int(m.jobLogViewport.ScrollPercent()*100))
+	}
+
+	statusContent := styles.StatusBarKey.Render("Esc") + styles.StatusBarDesc.Render(" close") + " │ " +
+		styles.StatusBarKey.Render("j/k") + styles.StatusBarDesc.Render(" jobs") + " │ " +
+		styles.StatusBarKey.Render("h/l") + styles.StatusBarDesc.Render(" scroll") + " │ " +
+		styles.StatusBarKey.Render("y") + styles.StatusBarDesc.Render(" copy") +
+		scrollInfo
+
+	if m.statusMsg != "" {
+		statusContent = styles.SelectedItem.Render(m.statusMsg) + " │ " + statusContent
+	}
+
+	statusBar := styles.StatusBar.Width(m.width).Render(statusContent)
+
+	return combined.String() + statusBar
+}
+
 func (m *MainScreen) renderDetailPanel(width, height int) string {
 	var content strings.Builder
-	innerWidth := width - 4
-	innerHeight := height - 3
 
-	if m.fileContent != "" {
-		// Use viewport for file content
-		if !m.detailReady {
-			m.detailViewport = viewport.New(innerWidth, innerHeight)
-			m.detailViewport.SetContent(m.fileContent)
-			m.detailReady = true
-		} else {
-			m.detailViewport.Width = innerWidth
-			m.detailViewport.Height = innerHeight
-		}
-		content.WriteString(m.detailViewport.View())
-		if m.detailViewport.TotalLineCount() > innerHeight {
-			scrollPercent := int(m.detailViewport.ScrollPercent() * 100)
-			content.WriteString(styles.DimmedText.Render(fmt.Sprintf(" [%d%%]", scrollPercent)))
-		}
-	} else if m.selectedProject != nil {
+	if m.selectedProject != nil {
 		switch m.contentTab {
 		case TabFiles:
-			if m.selectedContent < len(m.files) {
+			if m.viewingFile {
+				// Show file info when viewing
+				content.WriteString(styles.SelectedItem.Render(m.viewingFilePath) + "\n\n")
+				content.WriteString(styles.DimmedText.Render("Lines: ") + fmt.Sprintf("%d", strings.Count(m.fileContent, "\n")+1) + "\n")
+			} else if m.selectedContent < len(m.files) {
 				f := m.files[m.selectedContent]
 				content.WriteString(styles.SelectedItem.Render(f.Name) + "\n\n")
 				fileType := "File"
@@ -962,17 +1676,6 @@ func (m *MainScreen) renderDetailPanel(width, height int) string {
 				content.WriteString(styles.DimmedText.Render("SHA: ") + p.SHA[:8] + "\n")
 				content.WriteString(styles.DimmedText.Render("Source: ") + p.Source + "\n")
 			}
-		case TabBranches:
-			if m.selectedContent < len(m.branches) {
-				b := m.branches[m.selectedContent]
-				content.WriteString(styles.SelectedItem.Render(b.Name) + "\n\n")
-				content.WriteString(styles.DimmedText.Render("Commit: ") + b.Commit.ShortID + "\n")
-				content.WriteString(styles.DimmedText.Render("Author: ") + b.Commit.AuthorName + "\n")
-				content.WriteString(styles.DimmedText.Render("Message: ") + b.Commit.Title + "\n")
-				if b.Protected {
-					content.WriteString("\n" + styles.PipelineStatus("running").Render("🔒 Protected"))
-				}
-			}
 		}
 	} else {
 		content.WriteString(styles.DimmedText.Render("Select a project"))
@@ -981,7 +1684,124 @@ func (m *MainScreen) renderDetailPanel(width, height int) string {
 	return components.SimpleBorderedPanel("Details", content.String(), width, height, m.focusedPanel == PanelDetail)
 }
 
+func (m *MainScreen) renderBranchPopup() string {
+	// Centered popup for branch selection
+	popupWidth := 50
+	popupHeight := 20
+
+	if popupWidth > m.width-4 {
+		popupWidth = m.width - 4
+	}
+	if popupHeight > m.height-4 {
+		popupHeight = m.height - 4
+	}
+
+	var content strings.Builder
+
+	// Header
+	content.WriteString(styles.DimmedText.Render("Current: ") + styles.SelectedItem.Render(m.currentBranch) + "\n\n")
+
+	if len(m.branches) == 0 {
+		if m.loading {
+			content.WriteString(m.loadingMsg)
+		} else {
+			content.WriteString(styles.DimmedText.Render("No branches found"))
+		}
+	} else {
+		visibleLines := popupHeight - 6
+		if visibleLines < 5 {
+			visibleLines = 5
+		}
+
+		// Calculate scroll offset for branch list
+		startIdx := 0
+		if m.selectedBranchIdx >= visibleLines {
+			startIdx = m.selectedBranchIdx - visibleLines + 1
+		}
+		endIdx := startIdx + visibleLines
+		if endIdx > len(m.branches) {
+			endIdx = len(m.branches)
+		}
+
+		for i := startIdx; i < endIdx; i++ {
+			b := m.branches[i]
+			icon := "○"
+			if b.Default {
+				icon = "●"
+			}
+			if b.Name == m.currentBranch {
+				icon = "✓"
+			}
+
+			line := fmt.Sprintf("%s %s", icon, b.Name)
+			if i == m.selectedBranchIdx {
+				line = styles.SelectedItem.Render("> " + line)
+			} else {
+				line = "  " + line
+			}
+			content.WriteString(line + "\n")
+		}
+
+		// Scroll indicator
+		if len(m.branches) > visibleLines {
+			content.WriteString(styles.DimmedText.Render(fmt.Sprintf("\n[%d/%d]", m.selectedBranchIdx+1, len(m.branches))))
+		}
+	}
+
+	// Build popup panel
+	popup := components.SimpleBorderedPanel("Switch Branch", content.String(), popupWidth, popupHeight, true)
+
+	// Center the popup
+	popupLines := strings.Split(popup, "\n")
+	topPadding := (m.height - len(popupLines)) / 2
+	leftPadding := (m.width - popupWidth) / 2
+	if topPadding < 0 {
+		topPadding = 0
+	}
+	if leftPadding < 0 {
+		leftPadding = 0
+	}
+
+	var result strings.Builder
+	for i := 0; i < topPadding; i++ {
+		result.WriteString("\n")
+	}
+	for _, line := range popupLines {
+		result.WriteString(strings.Repeat(" ", leftPadding) + line + "\n")
+	}
+
+	// Status bar at bottom
+	statusContent := styles.StatusBarKey.Render("Esc") + styles.StatusBarDesc.Render(" cancel") + " │ " +
+		styles.StatusBarKey.Render("j/k") + styles.StatusBarDesc.Render(" navigate") + " │ " +
+		styles.StatusBarKey.Render("Enter") + styles.StatusBarDesc.Render(" switch")
+
+	// Pad to bottom
+	currentLines := topPadding + len(popupLines)
+	for i := currentLines; i < m.height-1; i++ {
+		result.WriteString("\n")
+	}
+
+	result.WriteString(styles.StatusBar.Width(m.width).Render(statusContent))
+
+	return result.String()
+}
+
 func (m *MainScreen) renderStatusBar() string {
+	// If there's an error, show it prominently with retry hint
+	if m.lastError != "" {
+		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true) // Red
+		errorMsg := m.lastError
+		// Truncate long error messages
+		maxLen := m.width - 30
+		if maxLen > 0 && len(errorMsg) > maxLen {
+			errorMsg = errorMsg[:maxLen] + "..."
+		}
+		errText := errorStyle.Render("Error: " + errorMsg)
+		retryHint := styles.StatusBarKey.Render(" r") + styles.StatusBarDesc.Render(" retry") + " │ " +
+			styles.StatusBarKey.Render("Esc") + styles.StatusBarDesc.Render(" dismiss")
+		return styles.StatusBar.Width(m.width).Render(errText + " " + retryHint)
+	}
+
 	panels := []struct {
 		id   PanelID
 		key  string

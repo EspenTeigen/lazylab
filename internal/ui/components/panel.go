@@ -139,13 +139,11 @@ func (p *Panel) formatContent(width, height int) string {
 	return strings.Join(result, "\n")
 }
 
-// SimpleBorderedPanel creates a simple bordered panel without all the complexity
+// SimpleBorderedPanel creates a bordered panel with exact dimensions
 func SimpleBorderedPanel(title string, content string, width, height int, focused bool) string {
 	borderColor := styles.ColorInactiveBorder
-	titleColor := styles.ColorInactiveTitle
 	if focused {
 		borderColor = styles.ColorActiveBorder
-		titleColor = styles.ColorActiveTitle
 	}
 
 	innerWidth := width - 2
@@ -155,50 +153,59 @@ func SimpleBorderedPanel(title string, content string, width, height int, focuse
 		return ""
 	}
 
-	// Format content
+	borderStyle := lipgloss.NewStyle().Foreground(borderColor)
+
+	// Prepare content lines - truncate/pad to fit exactly
 	contentLines := strings.Split(content, "\n")
-	formattedLines := make([]string, innerHeight)
+	paddedLines := make([]string, innerHeight)
 	for i := 0; i < innerHeight; i++ {
+		line := ""
 		if i < len(contentLines) {
-			line := contentLines[i]
-			// Truncate if needed
-			lineRunes := []rune(line)
-			if len(lineRunes) > innerWidth {
-				line = string(lineRunes[:innerWidth-1]) + "…"
-			}
-			formattedLines[i] = line
+			line = contentLines[i]
 		}
+		// Truncate if too long
+		if lipgloss.Width(line) > innerWidth {
+			// Use lipgloss to truncate properly
+			line = lipgloss.NewStyle().MaxWidth(innerWidth).Render(line)
+		}
+		// Pad to exact width
+		padding := innerWidth - lipgloss.Width(line)
+		if padding > 0 {
+			line = line + strings.Repeat(" ", padding)
+		}
+		paddedLines[i] = line
 	}
 
-	// Build the box manually for better control
-	borderStyle := lipgloss.NewStyle().Foreground(borderColor)
-	titleStyle := lipgloss.NewStyle().Foreground(titleColor).Bold(true)
+	// Build panel
+	var result strings.Builder
 
 	// Top border with title
 	titleText := " " + title + " "
-	topBorderLen := innerWidth - len(titleText)
-	leftBorder := topBorderLen / 2
-	rightBorder := topBorderLen - leftBorder
+	titleLen := len(title) + 2
+	leftLen := (innerWidth - titleLen) / 2
+	rightLen := innerWidth - titleLen - leftLen
+	if leftLen < 0 {
+		leftLen = 0
+	}
+	if rightLen < 0 {
+		rightLen = 0
+	}
 
-	top := borderStyle.Render("╭" + strings.Repeat("─", leftBorder)) +
-		titleStyle.Render(titleText) +
-		borderStyle.Render(strings.Repeat("─", rightBorder) + "╮")
+	result.WriteString(borderStyle.Render("╭" + strings.Repeat("─", leftLen)))
+	result.WriteString(titleText)
+	result.WriteString(borderStyle.Render(strings.Repeat("─", rightLen) + "╮"))
+	result.WriteString("\n")
 
-	// Content lines with borders
-	var middle strings.Builder
-	for _, line := range formattedLines {
-		padding := innerWidth - len([]rune(line))
-		middle.WriteString(borderStyle.Render("│"))
-		middle.WriteString(line)
-		if padding > 0 {
-			middle.WriteString(strings.Repeat(" ", padding))
-		}
-		middle.WriteString(borderStyle.Render("│"))
-		middle.WriteString("\n")
+	// Content lines
+	for _, line := range paddedLines {
+		result.WriteString(borderStyle.Render("│"))
+		result.WriteString(line)
+		result.WriteString(borderStyle.Render("│"))
+		result.WriteString("\n")
 	}
 
 	// Bottom border
-	bottom := borderStyle.Render("╰" + strings.Repeat("─", innerWidth) + "╯")
+	result.WriteString(borderStyle.Render("╰" + strings.Repeat("─", innerWidth) + "╯"))
 
-	return top + "\n" + middle.String() + bottom
+	return result.String()
 }

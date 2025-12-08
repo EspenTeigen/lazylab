@@ -133,3 +133,21 @@ type TreeEntry struct {
 	Path string `json:"path"`
 	Mode string `json:"mode"`
 }
+
+// Job represents a CI/CD job within a pipeline
+type Job struct {
+	ID         int       `json:"id"`
+	Name       string    `json:"name"`
+	Stage      string    `json:"stage"`
+	Status     string    `json:"status"`
+	Ref        string    `json:"ref"`
+	CreatedAt  time.Time `json:"created_at"`
+	StartedAt  time.Time `json:"started_at"`
+	FinishedAt time.Time `json:"finished_at"`
+	Duration   float64   `json:"duration"`
+	WebURL     string    `json:"web_url"`
+	Pipeline   struct {
+		ID  int `json:"id"`
+		Ref string `json:"ref"`
+	} `json:"pipeline"`
+}
