@@ -4,6 +4,10 @@ A terminal UI for GitLab, inspired by [lazygit](https://github.com/jesseduffield
 
 > **Note:** This is a vibe-coded project. I haven't written a single line of code myself - it's entirely AI-generated using [Claude Code](https://claude.ai/claude-code). I built this because I wanted it, not as a showcase of coding skills. If the code style isn't perfect, I don't care - it works for my use case.
 
+[![Go Report Card](https://goreportcard.com/badge/github.com/EspenTeigen/lazylab)](https://goreportcard.com/report/github.com/EspenTeigen/lazylab)
+[![Release](https://img.shields.io/github/v/release/EspenTeigen/lazylab)](https://github.com/EspenTeigen/lazylab/releases)
+[![License](https://img.shields.io/github/license/EspenTeigen/lazylab)](LICENSE)
+
 ## Features
 
 - Browse groups and projects in a tree view
