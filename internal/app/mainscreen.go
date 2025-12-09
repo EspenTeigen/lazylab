@@ -2541,6 +2541,9 @@ func (m *MainScreen) renderListSection(width, height int) string {
 						stageStyle := styles.PipelineStatus(status)
 						stagesStr += stageStyle.Render(stageIcon) + styles.DimmedText.Render("("+stage+")") + " "
 					}
+				} else {
+					// No jobs loaded yet - show status text for pending/created pipelines
+					stagesStr = statusStyle.Render("(" + p.Status + ")")
 				}
 
 				// Build meta info: user, time, source
@@ -2567,7 +2570,11 @@ func (m *MainScreen) renderListSection(width, height int) string {
 				// Show selected pipeline info
 				if m.selectedContent < len(m.pipelines) {
 					p := m.pipelines[m.selectedContent]
-					pInfo := fmt.Sprintf("%s | %s", p.Status, p.SHA[:8])
+					sha := p.SHA
+					if len(sha) > 8 {
+						sha = sha[:8]
+					}
+					pInfo := fmt.Sprintf("%s | %s", p.Status, sha)
 					content.WriteString("\n" + styles.DimmedText.Render(pInfo))
 				}
 			}
