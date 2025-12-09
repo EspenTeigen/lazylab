@@ -26,7 +26,7 @@ func NewDemoScreen() *MainScreen {
 		m.selectedProject = &projects[0]
 		m.files = mockFiles()
 		m.readmeContent = mockReadme()
-		m.readmeRendered = mockReadme()
+		m.readmeRendered = renderMarkdown(mockReadme(), 80)
 		m.pipelines = mockPipelines()
 		m.mergeRequests = mockMergeRequests()
 		m.branches = mockBranches()

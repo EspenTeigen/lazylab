@@ -164,15 +164,138 @@ func stripANSI(s string) string {
 	return ansiRegex.ReplaceAllString(s, "")
 }
 
+// Custom markdown style based on dark theme
+var markdownStyle = []byte(`{
+	"document": {
+		"block_prefix": "",
+		"block_suffix": "",
+		"margin": 0
+	},
+	"block_quote": {
+		"indent": 2,
+		"color": "244"
+	},
+	"list": {
+		"level_indent": 2
+	},
+	"heading": {
+		"block_suffix": "\n",
+		"bold": true
+	},
+	"h1": {
+		"bold": true,
+		"color": "39",
+		"block_suffix": "\n"
+	},
+	"h2": {
+		"bold": true,
+		"color": "39",
+		"block_suffix": "\n"
+	},
+	"h3": {
+		"bold": true,
+		"color": "39",
+		"block_suffix": "\n"
+	},
+	"h4": {
+		"bold": true,
+		"color": "39",
+		"block_suffix": "\n"
+	},
+	"h5": {
+		"bold": true,
+		"color": "39",
+		"block_suffix": "\n"
+	},
+	"h6": {
+		"bold": true,
+		"color": "39",
+		"block_suffix": "\n"
+	},
+	"text": {},
+	"strikethrough": {
+		"crossed_out": true
+	},
+	"emph": {
+		"italic": true
+	},
+	"strong": {
+		"bold": true
+	},
+	"hr": {
+		"color": "240",
+		"format": "\n--------\n"
+	},
+	"item": {
+		"block_prefix": "• "
+	},
+	"enumeration": {
+		"block_prefix": ". "
+	},
+	"task": {
+		"ticked": "[✓] ",
+		"unticked": "[ ] "
+	},
+	"link": {
+		"color": "30",
+		"underline": true
+	},
+	"link_text": {
+		"color": "35",
+		"bold": true
+	},
+	"image": {
+		"color": "212",
+		"underline": true
+	},
+	"image_text": {
+		"color": "243",
+		"format": "Image: {{.text}} →"
+	},
+	"code": {
+		"color": "203"
+	},
+	"code_block": {
+		"color": "244",
+		"margin": 1,
+		"chroma": {
+			"text": { "color": "#C4C4C4" },
+			"keyword": { "color": "#F92672" },
+			"name": { "color": "#F8F8F2" },
+			"literal": { "color": "#E6DB74" },
+			"string": { "color": "#E6DB74" },
+			"number": { "color": "#AE81FF" },
+			"operator": { "color": "#F92672" },
+			"comment": { "color": "#75715E" }
+		}
+	},
+	"table": {
+		"center_separator": "┼",
+		"column_separator": "│",
+		"row_separator": "─"
+	},
+	"definition_list": {},
+	"definition_term": {},
+	"definition_description": {
+		"block_prefix": "\n"
+	},
+	"html_block": {},
+	"html_span": {}
+}`)
+
 // renderMarkdown renders markdown content for terminal display
-func renderMarkdown(content string) string {
+func renderMarkdown(content string, width int) string {
 	if content == "" {
 		return ""
 	}
 
+	if width <= 0 {
+		width = 80
+	}
+
 	renderer, err := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
-		glamour.WithWordWrap(0), // We'll handle wrapping in the viewport
+		glamour.WithStylesFromJSONBytes(markdownStyle),
+		glamour.WithWordWrap(width),
 	)
 	if err != nil {
 		return content // Fall back to raw content
@@ -424,6 +547,13 @@ type MainScreen struct {
 	readmeReady    bool
 	jobLogReady    bool
 	fileViewReady  bool
+
+	// README visual mode
+	readmeCursor       int
+	readmeLastKey      string
+	readmeVisualMode   bool
+	readmeVisualStart  int
+	readmeVisualEnd    int
 
 	// Job selection for pipelines
 	selectedJobIdx int
@@ -991,7 +1121,12 @@ func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case projectContentMsg:
 		m.files = msg.entries
 		m.readmeContent = msg.readme
-		m.readmeRendered = renderMarkdown(msg.readme)
+		// Calculate content width for markdown rendering
+		contentWidth := int(float64(m.width) * (1 - config.NavigatorWidthRatio)) - 4
+		if contentWidth < 40 {
+			contentWidth = 80
+		}
+		m.readmeRendered = renderMarkdown(msg.readme, contentWidth)
 		m.fileContent = ""
 		m.selectedContent = 0
 		m.fileScrollOffset = 0
@@ -1148,9 +1283,9 @@ func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case jobLogTickMsg:
 		// Only refresh if job popup is still open
-		if m.showJobLogPopup && m.selectedJobIdx >= 0 {
-			// Refresh both jobs (for status updates) and log
-			return m, tea.Batch(m.refreshJobs(), m.refreshJobLog())
+		if m.showJobLogPopup {
+			// Refresh both jobs (for status updates) and log, then schedule next tick
+			return m, tea.Batch(m.refreshJobs(), m.refreshJobLog(), jobLogTickCmd())
 		}
 		return m, nil
 
@@ -1196,9 +1331,6 @@ func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.jobLogViewport.SetYOffset(currentLine)
 			}
-
-			// Schedule next tick
-			return m, jobLogTickCmd()
 		}
 		return m, nil
 
@@ -1210,6 +1342,9 @@ func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *MainScreen) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Clear status message on any keypress
+	m.statusMsg = ""
+
 	// Handle popups first
 	if m.showJobLogPopup {
 		return m.handleJobLogPopup(msg)
@@ -1237,6 +1372,32 @@ func (m *MainScreen) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.loadingMsg = "Retrying..."
 		cmd := m.retryCmd
 		return m, cmd
+	}
+
+	// Yank clone URLs when project is selected
+	if m.selectedProject != nil {
+		switch msg.String() {
+		case "S":
+			// Yank SSH URL
+			if m.selectedProject.SSHURLToRepo != "" {
+				if err := copyToClipboard(m.selectedProject.SSHURLToRepo); err != nil {
+					m.statusMsg = "Copy failed: " + err.Error()
+				} else {
+					m.statusMsg = "SSH: " + m.selectedProject.SSHURLToRepo
+				}
+				return m, nil
+			}
+		case "U":
+			// Yank HTTPS URL
+			if m.selectedProject.HTTPURLToRepo != "" {
+				if err := copyToClipboard(m.selectedProject.HTTPURLToRepo); err != nil {
+					m.statusMsg = "Copy failed: " + err.Error()
+				} else {
+					m.statusMsg = "HTTPS: " + m.selectedProject.HTTPURLToRepo
+				}
+				return m, nil
+			}
+		}
 	}
 
 	// 'b' to open branch selector (when viewing files)
@@ -1553,21 +1714,150 @@ func (m *MainScreen) adjustScrollOffset() {
 }
 
 func (m *MainScreen) handleReadmeNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch {
-	case key.Matches(msg, m.keymap.Left):
-		m.focusedPanel = PanelNavigator
-	case key.Matches(msg, m.keymap.Right):
-		m.focusedPanel = PanelContent
-	case key.Matches(msg, m.keymap.Up):
-		m.readmeViewport.ScrollUp(1)
-	case key.Matches(msg, m.keymap.Down):
-		m.readmeViewport.ScrollDown(1)
+	key := msg.String()
+
+	// Clear key sequence unless it's a sequence key (g, y)
+	if key != "g" && key != "y" {
+		m.readmeLastKey = ""
 	}
-	switch msg.String() {
+
+	// Get line count from raw content
+	maxLine := strings.Count(m.readmeContent, "\n")
+
+	switch key {
+	case "H", "shift+left":
+		m.focusedPanel = PanelNavigator
+		return m, nil
+	case "L", "shift+right":
+		m.focusedPanel = PanelContent
+		return m, nil
+	case "h", "left":
+		m.focusedPanel = PanelNavigator
+		return m, nil
+	case "l", "right":
+		m.focusedPanel = PanelContent
+		return m, nil
+	case "j", "down":
+		if m.readmeCursor < maxLine {
+			m.readmeCursor++
+			if m.readmeVisualMode {
+				m.readmeVisualEnd = m.readmeCursor
+			}
+		}
+		// Keep cursor in view
+		viewportBottom := m.readmeViewport.YOffset + m.readmeViewport.Height - 1
+		if m.readmeCursor > viewportBottom {
+			m.readmeViewport.ScrollDown(1)
+		}
+	case "k", "up":
+		if m.readmeCursor > 0 {
+			m.readmeCursor--
+			if m.readmeVisualMode {
+				m.readmeVisualEnd = m.readmeCursor
+			}
+		}
+		// Keep cursor in view
+		if m.readmeCursor < m.readmeViewport.YOffset {
+			m.readmeViewport.ScrollUp(1)
+		}
 	case "ctrl+d":
 		m.readmeViewport.HalfPageDown()
+		m.readmeCursor += m.readmeViewport.Height / 2
+		if m.readmeCursor > maxLine {
+			m.readmeCursor = maxLine
+		}
+		if m.readmeVisualMode {
+			m.readmeVisualEnd = m.readmeCursor
+		}
 	case "ctrl+u":
 		m.readmeViewport.HalfPageUp()
+		m.readmeCursor -= m.readmeViewport.Height / 2
+		if m.readmeCursor < 0 {
+			m.readmeCursor = 0
+		}
+		if m.readmeVisualMode {
+			m.readmeVisualEnd = m.readmeCursor
+		}
+	case "g":
+		if m.readmeLastKey == "g" {
+			// gg - go to top
+			m.readmeViewport.GotoTop()
+			m.readmeCursor = 0
+			if m.readmeVisualMode {
+				m.readmeVisualEnd = m.readmeCursor
+			}
+			m.readmeLastKey = "gg"
+			return m, nil
+		}
+		m.readmeLastKey = "g"
+		return m, nil
+	case "G":
+		m.readmeViewport.GotoBottom()
+		m.readmeCursor = maxLine
+		if m.readmeVisualMode {
+			m.readmeVisualEnd = m.readmeCursor
+		}
+	case "V":
+		// Toggle visual line mode
+		if m.readmeVisualMode {
+			m.readmeVisualMode = false
+		} else {
+			m.readmeVisualMode = true
+			m.readmeVisualStart = m.readmeCursor
+			m.readmeVisualEnd = m.readmeCursor
+		}
+	case "y":
+		if m.readmeContent == "" {
+			m.readmeLastKey = ""
+			return m, nil
+		}
+		lines := strings.Split(m.readmeContent, "\n")
+		if m.readmeVisualMode {
+			// Copy selected lines
+			startLine := m.readmeVisualStart
+			endLine := m.readmeVisualEnd
+			if startLine > endLine {
+				startLine, endLine = endLine, startLine
+			}
+			if startLine < 0 {
+				startLine = 0
+			}
+			if endLine >= len(lines) {
+				endLine = len(lines) - 1
+			}
+			selected := strings.Join(lines[startLine:endLine+1], "\n")
+			if err := copyToClipboard(selected); err != nil {
+				m.statusMsg = "Copy failed: " + err.Error()
+			} else {
+				m.statusMsg = fmt.Sprintf("Copied %d lines!", endLine-startLine+1)
+			}
+			m.readmeVisualMode = false
+		} else if m.readmeLastKey == "gg" {
+			// ggy - yank entire readme
+			if err := copyToClipboard(m.readmeContent); err != nil {
+				m.statusMsg = "Copy failed: " + err.Error()
+			} else {
+				m.statusMsg = fmt.Sprintf("Yanked all %d lines!", len(lines))
+			}
+		} else if m.readmeLastKey == "y" {
+			// yy - yank current line
+			if m.readmeCursor >= 0 && m.readmeCursor < len(lines) {
+				if err := copyToClipboard(lines[m.readmeCursor]); err != nil {
+					m.statusMsg = "Copy failed: " + err.Error()
+				} else {
+					m.statusMsg = "Yanked line!"
+				}
+			}
+		} else {
+			m.readmeLastKey = "y"
+			return m, nil
+		}
+		m.readmeLastKey = ""
+	case "esc", "escape":
+		if m.readmeVisualMode {
+			m.readmeVisualMode = false
+			return m, nil
+		}
 	}
 	return m, nil
 }
@@ -2304,12 +2594,50 @@ func (m *MainScreen) renderReadmeSection(width, height int) string {
 
 	// Build the panel manually with viewport content
 	var content strings.Builder
-	content.WriteString(m.readmeViewport.View())
 
-	// Add scroll indicator
+	// Apply cursor and visual selection highlighting
+	viewContent := m.readmeViewport.View()
+	lines := strings.Split(viewContent, "\n")
+
+	// Calculate visual selection range
+	selStart := m.readmeVisualStart
+	selEnd := m.readmeVisualEnd
+	if selStart > selEnd {
+		selStart, selEnd = selEnd, selStart
+	}
+
+	for i, line := range lines {
+		viewportLine := m.readmeViewport.YOffset + i
+
+		// Highlight visual selection
+		if m.readmeVisualMode && viewportLine >= selStart && viewportLine <= selEnd {
+			line = lipgloss.NewStyle().Background(lipgloss.Color("238")).Render(line)
+		}
+
+		// Show cursor line when focused
+		if m.focusedPanel == PanelReadme && viewportLine == m.readmeCursor {
+			line = lipgloss.NewStyle().Reverse(true).Render(line)
+		}
+		lines[i] = line
+	}
+	content.WriteString(strings.Join(lines, "\n"))
+
+	// Add scroll indicator and visual mode status
+	var statusParts []string
 	if m.readmeViewport.TotalLineCount() > innerHeight {
 		scrollPercent := int(m.readmeViewport.ScrollPercent() * 100)
-		content.WriteString(styles.DimmedText.Render(fmt.Sprintf(" [%d%%]", scrollPercent)))
+		statusParts = append(statusParts, fmt.Sprintf("[%d%%]", scrollPercent))
+	}
+	if m.readmeVisualMode {
+		lineCount := m.readmeVisualEnd - m.readmeVisualStart
+		if lineCount < 0 {
+			lineCount = -lineCount
+		}
+		lineCount++
+		statusParts = append(statusParts, fmt.Sprintf("VISUAL(%d)", lineCount))
+	}
+	if len(statusParts) > 0 {
+		content.WriteString(styles.DimmedText.Render(" " + strings.Join(statusParts, " ")))
 	}
 
 	return components.SimpleBorderedPanel("README", content.String(), width, height, m.focusedPanel == PanelReadme)
@@ -2330,11 +2658,8 @@ func (m *MainScreen) renderJobLogPopup() string {
 		icon := styles.PipelineIcon(job.Status)
 		statusStyle := styles.PipelineStatus(job.Status)
 
-		// Format: icon stage/name
-		line := fmt.Sprintf("%s %s", icon, job.Name)
-		if job.Stage != "" && job.Stage != job.Name {
-			line = fmt.Sprintf("%s %s:%s", icon, job.Stage, job.Name)
-		}
+		// Format: icon name (status)
+		line := fmt.Sprintf("%s %s (%s)", icon, job.Name, job.Status)
 
 		// Truncate if too long
 		if len(line) > jobListWidth-4 {
@@ -2571,6 +2896,12 @@ func (m *MainScreen) renderBranchPopup() string {
 }
 
 func (m *MainScreen) renderStatusBar() string {
+	// If there's a status message, show it prominently
+	if m.statusMsg != "" {
+		msgStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true) // Green
+		return styles.StatusBar.Width(m.width).Render(msgStyle.Render(m.statusMsg))
+	}
+
 	// If there's an error, show it prominently with retry hint
 	if m.lastError != "" {
 		errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true) // Red
@@ -2607,11 +2938,21 @@ func (m *MainScreen) renderStatusBar() string {
 
 	left := strings.Join(parts, " ")
 
-	help := styles.StatusBarKey.Render("j/k") + styles.StatusBarDesc.Render(" up/down") + " │ " +
-		styles.StatusBarKey.Render("h/l") + styles.StatusBarDesc.Render(" tabs") + " │ " +
-		styles.StatusBarKey.Render("Enter") + styles.StatusBarDesc.Render(" select") + " │ " +
-		styles.StatusBarKey.Render("Esc") + styles.StatusBarDesc.Render(" back") + " │ " +
-		styles.StatusBarKey.Render("q") + styles.StatusBarDesc.Render(" quit")
+	var help string
+	if m.focusedPanel == PanelReadme {
+		// README-specific keybindings
+		help = styles.StatusBarKey.Render("j/k") + styles.StatusBarDesc.Render(" scroll") + " │ " +
+			styles.StatusBarKey.Render("V") + styles.StatusBarDesc.Render(" select") + " │ " +
+			styles.StatusBarKey.Render("yy") + styles.StatusBarDesc.Render(" yank") + " │ " +
+			styles.StatusBarKey.Render("ggy") + styles.StatusBarDesc.Render(" all") + " │ " +
+			styles.StatusBarKey.Render("q") + styles.StatusBarDesc.Render(" quit")
+	} else {
+		help = styles.StatusBarKey.Render("j/k") + styles.StatusBarDesc.Render(" nav") + " │ " +
+			styles.StatusBarKey.Render("Enter") + styles.StatusBarDesc.Render(" select") + " │ " +
+			styles.StatusBarKey.Render("S") + styles.StatusBarDesc.Render(" ssh") + " " +
+			styles.StatusBarKey.Render("U") + styles.StatusBarDesc.Render(" https") + " │ " +
+			styles.StatusBarKey.Render("q") + styles.StatusBarDesc.Render(" quit")
+	}
 
 	leftWidth := lipgloss.Width(left)
 	rightWidth := lipgloss.Width(help)

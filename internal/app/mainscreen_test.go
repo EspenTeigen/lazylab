@@ -174,13 +174,13 @@ func TestWrapText_ZeroWidth(t *testing.T) {
 
 func TestRenderMarkdown(t *testing.T) {
 	// Test empty content
-	result := renderMarkdown("")
+	result := renderMarkdown("", 80)
 	if result != "" {
 		t.Errorf("expected empty string for empty input, got '%s'", result)
 	}
 
 	// Test basic markdown
-	result = renderMarkdown("# Hello")
+	result = renderMarkdown("# Hello", 80)
 	if result == "" {
 		t.Error("expected non-empty result for markdown input")
 	}
