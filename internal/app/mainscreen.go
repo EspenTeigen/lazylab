@@ -243,6 +243,51 @@ func hardTruncate(s string, maxWidth int) string {
 	return ""
 }
 
+// sliceByWidth returns a substring starting at visual offset and fitting within maxWidth
+func sliceByWidth(s string, offset, maxWidth int) string {
+	if maxWidth <= 0 {
+		return ""
+	}
+	if offset <= 0 {
+		return hardTruncate(s, maxWidth)
+	}
+
+	// Strip ANSI codes for width calculation, but we need to preserve them
+	// For simplicity, strip them entirely when scrolling horizontally
+	clean := stripANSI(s)
+
+	// Skip 'offset' visual characters
+	runes := []rune(clean)
+	skipped := 0
+	startIdx := 0
+	for i, r := range runes {
+		if skipped >= offset {
+			startIdx = i
+			break
+		}
+		skipped += lipgloss.Width(string(r))
+		startIdx = i + 1
+	}
+
+	if startIdx >= len(runes) {
+		return ""
+	}
+
+	// Take up to maxWidth characters
+	result := []rune{}
+	currentWidth := 0
+	for i := startIdx; i < len(runes); i++ {
+		runeWidth := lipgloss.Width(string(runes[i]))
+		if currentWidth+runeWidth > maxWidth {
+			break
+		}
+		result = append(result, runes[i])
+		currentWidth += runeWidth
+	}
+
+	return string(result)
+}
+
 // wrapText wraps all lines in text to fit within maxWidth
 func wrapText(text string, maxWidth int) string {
 	if maxWidth <= 0 {
@@ -387,7 +432,8 @@ type MainScreen struct {
 	fileScrollOffset int
 
 	// Job log popup
-	showJobLogPopup bool
+	showJobLogPopup   bool
+	currentPipelineID int // Pipeline ID for job refresh
 
 	// Branch selector popup
 	showBranchPopup   bool
@@ -401,14 +447,14 @@ type MainScreen struct {
 	lastError string
 	retryCmd  tea.Cmd // Command to retry on 'r' key
 
-	// Visual line mode for job log
-	visualLineMode   bool
-	visualStartLine  int
-	visualEndLine    int
-
 	// Job log popup focus (true = log panel, false = job list)
-	jobLogFocused bool
-	jobLogCursor  int // Current cursor line in log
+	jobLogFocused    bool
+	jobLogCursor     int    // Current cursor line in log
+	jobLogHScroll    int    // Horizontal scroll offset
+	jobLogLastKey    string // Last key pressed (for sequences like yy, gg)
+	visualLineMode   bool   // Visual line selection active
+	visualStartLine  int    // Start of visual selection
+	visualEndLine    int    // End of visual selection (follows cursor)
 
 	// Demo mode (no API calls)
 	isDemo bool
@@ -845,6 +891,9 @@ type jobLogTickMsg time.Time
 // jobLogRefreshedMsg carries refreshed log content
 type jobLogRefreshedMsg struct{ log string }
 
+// jobsRefreshedMsg carries refreshed job statuses
+type jobsRefreshedMsg struct{ jobs []gitlab.Job }
+
 // jobLogTickCmd returns a command that sends a tick after the configured interval
 func jobLogTickCmd() tea.Cmd {
 	return tea.Tick(config.JobLogRefreshInterval, func(t time.Time) tea.Msg {
@@ -866,6 +915,22 @@ func (m *MainScreen) refreshJobLog() tea.Cmd {
 			return nil
 		}
 		return jobLogRefreshedMsg{log: log}
+	}
+}
+
+// refreshJobs fetches updated job statuses for the current pipeline
+func (m *MainScreen) refreshJobs() tea.Cmd {
+	if m.selectedProject == nil || m.isDemo || m.currentPipelineID == 0 {
+		return nil
+	}
+	projectID := fmt.Sprintf("%d", m.selectedProject.ID)
+	pipelineID := m.currentPipelineID
+	return func() tea.Msg {
+		jobs, err := m.client.ListPipelineJobs(projectID, pipelineID)
+		if err != nil {
+			return nil
+		}
+		return jobsRefreshedMsg{jobs: jobs}
 	}
 }
 
@@ -1084,7 +1149,28 @@ func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case jobLogTickMsg:
 		// Only refresh if job popup is still open
 		if m.showJobLogPopup && m.selectedJobIdx >= 0 {
-			return m, m.refreshJobLog()
+			// Refresh both jobs (for status updates) and log
+			return m, tea.Batch(m.refreshJobs(), m.refreshJobLog())
+		}
+		return m, nil
+
+	case jobsRefreshedMsg:
+		if m.showJobLogPopup && msg.jobs != nil {
+			// Preserve selection by job ID
+			selectedJobID := 0
+			if m.selectedJobIdx >= 0 && m.selectedJobIdx < len(m.jobs) {
+				selectedJobID = m.jobs[m.selectedJobIdx].ID
+			}
+			m.jobs = msg.jobs
+			// Restore selection
+			if selectedJobID != 0 {
+				for i, job := range m.jobs {
+					if job.ID == selectedJobID {
+						m.selectedJobIdx = i
+						break
+					}
+				}
+			}
 		}
 		return m, nil
 
@@ -1101,8 +1187,8 @@ func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cleanLog := msg.log
 			cleanLog = strings.ReplaceAll(cleanLog, "\t", "    ")
 			cleanLog = strings.ReplaceAll(cleanLog, "\r", "")
-			wrappedLog := wrapText(cleanLog, m.jobLogViewport.Width)
-			m.jobLogViewport.SetContent(wrappedLog)
+			// Don't wrap - preserve line numbers for visual selection
+			m.jobLogViewport.SetContent(cleanLog)
 
 			// Auto-scroll to bottom when not focused on log panel, or was already at bottom
 			if !m.jobLogFocused || wasAtBottom {
@@ -1392,6 +1478,10 @@ func (m *MainScreen) handleContentNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.jobs = nil
 			m.jobLog = ""
 			m.showJobLogPopup = true
+			m.jobLogFocused = false // Start focused on job list
+			m.jobLogCursor = 0
+			m.jobLogHScroll = 0
+			m.currentPipelineID = pipeline.ID
 			m.loading = true
 			m.loadingMsg = "Loading jobs..."
 			cmd := m.loadPipelineJobs(pipeline.ID)
@@ -1520,23 +1610,29 @@ func (m *MainScreen) handleBranchPopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *MainScreen) handleJobLogPopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
+	key := msg.String()
+
+	// Clear key sequence unless it's a sequence key (g, y)
+	if key != "g" && key != "y" {
+		m.jobLogLastKey = ""
+	}
+
+	switch key {
 	case "q":
 		m.showJobLogPopup = false
 		m.jobs = nil
 		m.jobLog = ""
 		m.statusMsg = ""
 		m.lastError = ""
-		m.visualLineMode = false
 		m.jobLogFocused = false
 		return m, nil
 	case "esc", "escape":
-		// Exit visual mode first, then switch to job list, then close
+		// Cancel visual mode first
 		if m.visualLineMode {
 			m.visualLineMode = false
-			m.statusMsg = ""
 			return m, nil
 		}
+		// Switch to job list first, then close
 		if m.jobLogFocused {
 			m.jobLogFocused = false
 			return m, nil
@@ -1546,43 +1642,43 @@ func (m *MainScreen) handleJobLogPopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.jobLog = ""
 		m.statusMsg = ""
 		m.lastError = ""
+		m.visualLineMode = false
 		return m, nil
-	case "h", "left":
+	case "H", "shift+left":
 		// Switch to job list panel
-		if m.jobLogFocused && !m.visualLineMode {
+		if m.jobLogFocused {
 			m.jobLogFocused = false
 		}
 		return m, nil
-	case "l", "right", "enter":
+	case "L", "shift+right", "enter":
 		// Switch to log panel
 		if !m.jobLogFocused {
 			m.jobLogFocused = true
 		}
 		return m, nil
-	case "V":
-		// Toggle visual line mode (only in log panel)
-		if !m.jobLogFocused {
-			return m, nil
+	case "h", "left":
+		// Scroll left
+		if m.jobLogFocused && m.jobLogHScroll > 0 {
+			m.jobLogHScroll -= 20
+			if m.jobLogHScroll < 0 {
+				m.jobLogHScroll = 0
+			}
 		}
-		if m.visualLineMode {
-			m.visualLineMode = false
-			m.statusMsg = ""
-		} else {
-			m.visualLineMode = true
-			m.visualStartLine = m.jobLogCursor
-			m.visualEndLine = m.jobLogCursor
-			m.statusMsg = "-- VISUAL LINE --"
+		return m, nil
+	case "l", "right":
+		// Scroll right
+		if m.jobLogFocused {
+			m.jobLogHScroll += 20
 		}
 		return m, nil
 	case "j", "down":
 		if m.jobLogFocused {
-			if m.visualLineMode {
-				// Extend selection down
-				m.visualEndLine++
-				m.jobLogCursor = m.visualEndLine
-			} else {
-				// Move cursor down
+			maxLine := strings.Count(m.jobLog, "\n")
+			if m.jobLogCursor < maxLine {
 				m.jobLogCursor++
+				if m.visualLineMode {
+					m.visualEndLine = m.jobLogCursor
+				}
 			}
 			// Keep cursor in view
 			viewportBottom := m.jobLogViewport.YOffset + m.jobLogViewport.Height - 1
@@ -1596,6 +1692,8 @@ func (m *MainScreen) handleJobLogPopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if !m.isDemo {
 					m.jobLog = ""
 					m.jobLogReady = false
+					m.jobLogHScroll = 0
+					m.visualLineMode = false
 					m.loading = true
 					m.loadingMsg = "Loading job log..."
 					m.statusMsg = ""
@@ -1607,16 +1705,10 @@ func (m *MainScreen) handleJobLogPopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	case "k", "up":
 		if m.jobLogFocused {
-			if m.visualLineMode {
-				// Extend selection up
-				if m.visualEndLine > 0 {
-					m.visualEndLine--
-					m.jobLogCursor = m.visualEndLine
-				}
-			} else {
-				// Move cursor up
-				if m.jobLogCursor > 0 {
-					m.jobLogCursor--
+			if m.jobLogCursor > 0 {
+				m.jobLogCursor--
+				if m.visualLineMode {
+					m.visualEndLine = m.jobLogCursor
 				}
 			}
 			// Keep cursor in view
@@ -1630,6 +1722,8 @@ func (m *MainScreen) handleJobLogPopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				if !m.isDemo {
 					m.jobLog = ""
 					m.jobLogReady = false
+					m.jobLogHScroll = 0
+					m.visualLineMode = false
 					m.loading = true
 					m.loadingMsg = "Loading job log..."
 					m.statusMsg = ""
@@ -1642,65 +1736,131 @@ func (m *MainScreen) handleJobLogPopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+d":
 		if m.jobLogFocused {
 			m.jobLogViewport.HalfPageDown()
+			maxLine := strings.Count(m.jobLog, "\n")
+			m.jobLogCursor += m.jobLogViewport.Height / 2
+			if m.jobLogCursor > maxLine {
+				m.jobLogCursor = maxLine
+			}
 			if m.visualLineMode {
-				m.visualEndLine = m.jobLogViewport.YOffset
+				m.visualEndLine = m.jobLogCursor
 			}
 		}
 	case "ctrl+u":
 		if m.jobLogFocused {
 			m.jobLogViewport.HalfPageUp()
-			if m.visualLineMode {
-				m.visualEndLine = m.jobLogViewport.YOffset
+			m.jobLogCursor -= m.jobLogViewport.Height / 2
+			if m.jobLogCursor < 0 {
+				m.jobLogCursor = 0
 			}
-		}
-	case "g":
-		if m.jobLogFocused {
-			m.jobLogViewport.GotoTop()
-			m.jobLogCursor = 0
-			if m.visualLineMode {
-				m.visualEndLine = 0
-			}
-		}
-	case "G":
-		if m.jobLogFocused {
-			m.jobLogViewport.GotoBottom()
-			m.jobLogCursor = m.jobLogViewport.TotalLineCount() - 1
 			if m.visualLineMode {
 				m.visualEndLine = m.jobLogCursor
 			}
 		}
+	case "g":
+		if m.jobLogFocused {
+			if m.jobLogLastKey == "g" {
+				// gg - go to top
+				m.jobLogViewport.GotoTop()
+				m.jobLogCursor = 0
+				if m.visualLineMode {
+					m.visualEndLine = m.jobLogCursor
+				}
+				m.jobLogLastKey = "gg" // Mark that we did gg
+				return m, nil
+			}
+			m.jobLogLastKey = "g"
+			return m, nil
+		}
+	case "G":
+		if m.jobLogFocused {
+			m.jobLogViewport.GotoBottom()
+			m.jobLogCursor = strings.Count(m.jobLog, "\n")
+			if m.visualLineMode {
+				m.visualEndLine = m.jobLogCursor
+			}
+		}
+	case "V":
+		// Toggle visual line mode
+		if m.jobLogFocused {
+			if m.visualLineMode {
+				m.visualLineMode = false
+			} else {
+				m.visualLineMode = true
+				m.visualStartLine = m.jobLogCursor
+				m.visualEndLine = m.jobLogCursor
+			}
+		}
 	case "y":
+		if m.jobLog == "" {
+			m.jobLogLastKey = ""
+			return m, nil
+		}
+		lines := strings.Split(m.jobLog, "\n")
 		if m.visualLineMode {
 			// Copy selected lines
-			lines := strings.Split(m.jobLog, "\n")
-			start := m.visualStartLine
-			end := m.visualEndLine
-			if start > end {
-				start, end = end, start
+			startLine := m.visualStartLine
+			endLine := m.visualEndLine
+			if startLine > endLine {
+				startLine, endLine = endLine, startLine
 			}
-			if end >= len(lines) {
-				end = len(lines) - 1
+			// Clamp to valid range
+			if startLine < 0 {
+				startLine = 0
 			}
-			if start < 0 {
-				start = 0
+			if endLine >= len(lines) {
+				endLine = len(lines) - 1
 			}
-			selected := strings.Join(lines[start:end+1], "\n")
+			selected := strings.Join(lines[startLine:endLine+1], "\n")
 			cleanLog := stripANSI(selected)
 			if err := copyToClipboard(cleanLog); err != nil {
 				m.statusMsg = "Copy failed: " + err.Error()
 			} else {
-				m.statusMsg = fmt.Sprintf("Copied %d lines!", end-start+1)
+				m.statusMsg = fmt.Sprintf("Copied %d lines!", endLine-startLine+1)
 			}
 			m.visualLineMode = false
-		} else {
-			// Copy entire job log
-			if m.jobLog != "" {
-				cleanLog := stripANSI(m.jobLog)
-				if err := copyToClipboard(cleanLog); err != nil {
+		} else if m.jobLogLastKey == "gg" {
+			// ggy - yank entire log
+			cleanLog := stripANSI(m.jobLog)
+			if err := copyToClipboard(cleanLog); err != nil {
+				m.statusMsg = "Copy failed: " + err.Error()
+			} else {
+				m.statusMsg = fmt.Sprintf("Yanked all %d lines!", len(lines))
+			}
+		} else if m.jobLogLastKey == "y" {
+			// yy - yank current line
+			if m.jobLogCursor >= 0 && m.jobLogCursor < len(lines) {
+				cleanLine := stripANSI(lines[m.jobLogCursor])
+				if err := copyToClipboard(cleanLine); err != nil {
 					m.statusMsg = "Copy failed: " + err.Error()
 				} else {
-					m.statusMsg = "Copied to clipboard!"
+					m.statusMsg = "Yanked line!"
 				}
+			}
+		} else {
+			// First y - wait for second key
+			m.jobLogLastKey = "y"
+			return m, nil
+		}
+		m.jobLogLastKey = ""
+	case "0":
+		// Go to start of line
+		if m.jobLogFocused {
+			m.jobLogHScroll = 0
+		}
+	case "$":
+		// Go to end of line (find max line width)
+		if m.jobLogFocused && m.jobLog != "" {
+			lines := strings.Split(m.jobLog, "\n")
+			maxWidth := 0
+			for _, line := range lines {
+				w := lipgloss.Width(stripANSI(line))
+				if w > maxWidth {
+					maxWidth = w
+				}
+			}
+			// Scroll to show end of longest line
+			if maxWidth > 80 {
+				m.jobLogHScroll = maxWidth - 80
 			}
 		}
 	}
@@ -2218,34 +2378,37 @@ func (m *MainScreen) renderJobLogPopup() string {
 			cleanLog = strings.ReplaceAll(cleanLog, "\t", "    ")
 			// Remove carriage returns (CI logs use these for progress updates)
 			cleanLog = strings.ReplaceAll(cleanLog, "\r", "")
-			wrappedLog := wrapText(cleanLog, logInnerWidth)
-			m.jobLogViewport.SetContent(wrappedLog)
+			// Don't wrap - truncate lines to preserve line numbers for visual selection
+			m.jobLogViewport.SetContent(cleanLog)
 			// Start at bottom where errors usually are
 			m.jobLogViewport.GotoBottom()
 			m.jobLogReady = true
 		}
-		// Get viewport content and apply visual selection highlighting
+		// Get viewport content and apply cursor/selection highlighting + horizontal scroll
 		viewContent := m.jobLogViewport.View()
 		lines := strings.Split(viewContent, "\n")
-		for i, line := range lines {
-			// Also replace any remaining tabs
-			line = strings.ReplaceAll(line, "\t", "    ")
-			line = hardTruncate(line, logInnerWidth)
 
-			// Apply cursor or visual selection highlighting
+		// Calculate visual selection range
+		selStart := m.visualStartLine
+		selEnd := m.visualEndLine
+		if selStart > selEnd {
+			selStart, selEnd = selEnd, selStart
+		}
+
+		for i, line := range lines {
+			line = strings.ReplaceAll(line, "\t", "    ")
+			// Apply horizontal scroll
+			line = sliceByWidth(line, m.jobLogHScroll, logInnerWidth)
+
 			viewportLine := m.jobLogViewport.YOffset + i
-			if m.visualLineMode {
-				start := m.visualStartLine
-				end := m.visualEndLine
-				if start > end {
-					start, end = end, start
-				}
-				if viewportLine >= start && viewportLine <= end {
-					// Highlight selected line with reverse video
-					line = lipgloss.NewStyle().Reverse(true).Render(line)
-				}
-			} else if m.jobLogFocused && viewportLine == m.jobLogCursor {
-				// Show cursor line
+
+			// Highlight visual selection
+			if m.visualLineMode && viewportLine >= selStart && viewportLine <= selEnd {
+				line = lipgloss.NewStyle().Background(lipgloss.Color("238")).Render(line)
+			}
+
+			// Show cursor line when focused (on top of selection)
+			if m.jobLogFocused && viewportLine == m.jobLogCursor {
 				line = lipgloss.NewStyle().Reverse(true).Render(line)
 			}
 			lines[i] = line
@@ -2275,13 +2438,26 @@ func (m *MainScreen) renderJobLogPopup() string {
 	if m.jobLogReady && m.jobLogViewport.TotalLineCount() > logInnerHeight {
 		scrollInfo = fmt.Sprintf(" [%d%%]", int(m.jobLogViewport.ScrollPercent()*100))
 	}
+	if m.jobLogHScroll > 0 {
+		scrollInfo += fmt.Sprintf(" [→%d]", m.jobLogHScroll)
+	}
 
-	statusContent := styles.StatusBarKey.Render("h/l") + styles.StatusBarDesc.Render(" panels") + " │ " +
-		styles.StatusBarKey.Render("j/k") + styles.StatusBarDesc.Render(" nav") + " │ " +
+	statusContent := styles.StatusBarKey.Render("H/L") + styles.StatusBarDesc.Render(" panels") + " │ " +
+		styles.StatusBarKey.Render("hjkl") + styles.StatusBarDesc.Render(" nav") + " │ " +
 		styles.StatusBarKey.Render("V") + styles.StatusBarDesc.Render(" select") + " │ " +
-		styles.StatusBarKey.Render("y") + styles.StatusBarDesc.Render(" copy") + " │ " +
-		styles.StatusBarKey.Render("Esc") + styles.StatusBarDesc.Render(" back") +
+		styles.StatusBarKey.Render("yy") + styles.StatusBarDesc.Render(" yank") + " │ " +
+		styles.StatusBarKey.Render("ggy") + styles.StatusBarDesc.Render(" all") + " │ " +
+		styles.StatusBarKey.Render("q") + styles.StatusBarDesc.Render(" close") +
 		scrollInfo
+
+	if m.visualLineMode {
+		lineCount := m.visualEndLine - m.visualStartLine
+		if lineCount < 0 {
+			lineCount = -lineCount
+		}
+		lineCount++
+		statusContent = styles.SelectedItem.Render(fmt.Sprintf("VISUAL LINE (%d)", lineCount)) + " │ " + statusContent
+	}
 
 	if m.statusMsg != "" {
 		statusContent = styles.SelectedItem.Render(m.statusMsg) + " │ " + statusContent

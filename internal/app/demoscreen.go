@@ -16,7 +16,7 @@ func NewDemoScreen() *MainScreen {
 		focusedPanel:   PanelNavigator,
 		contentTab:     TabFiles,
 		keymap:         keymap.DefaultKeyMap(),
-		pipelineJobs:   make(map[int][]gitlab.Job),
+		pipelineJobs:   mockPipelineJobs(),
 		isDemo:         true,
 	}
 
@@ -139,6 +139,18 @@ func mockPipelines() []gitlab.Pipeline {
 	now := time.Now()
 	return []gitlab.Pipeline{
 		{
+			ID:        1002,
+			IID:       43,
+			Status:    "running",
+			Ref:       "feature/rate-limit",
+			SHA:       "f3e2d1c0",
+			Source:    "push",
+			CreatedAt: now.Add(-5 * time.Minute),
+			UpdatedAt: now.Add(-2 * time.Minute),
+			WebURL:    "https://gitlab.com/acme-corp/api-gateway/-/pipelines/1002",
+			User:      gitlab.User{Username: "achen", Name: "Alice Chen"},
+		},
+		{
 			ID:        1001,
 			IID:       42,
 			Status:    "success",
@@ -157,8 +169,8 @@ func mockPipelines() []gitlab.Pipeline {
 			Ref:       "feature/auth",
 			SHA:       "e5f6g7h8",
 			Source:    "push",
-			CreatedAt: now.Add(-24 * time.Hour),
-			UpdatedAt: now.Add(-23 * time.Hour),
+			CreatedAt: now.Add(-6 * time.Hour),
+			UpdatedAt: now.Add(-5 * time.Hour),
 			WebURL:    "https://gitlab.com/acme-corp/api-gateway/-/pipelines/1000",
 			User:      gitlab.User{Username: "bsmith", Name: "Bob Smith"},
 		},
@@ -172,7 +184,7 @@ func mockPipelines() []gitlab.Pipeline {
 			CreatedAt: now.Add(-48 * time.Hour),
 			UpdatedAt: now.Add(-47 * time.Hour),
 			WebURL:    "https://gitlab.com/acme-corp/api-gateway/-/pipelines/999",
-			User:      gitlab.User{Username: "achen", Name: "Alice Chen"},
+			User:      gitlab.User{Username: "cjones", Name: "Carol Jones"},
 		},
 	}
 }
@@ -180,6 +192,19 @@ func mockPipelines() []gitlab.Pipeline {
 func mockMergeRequests() []gitlab.MergeRequest {
 	now := time.Now()
 	return []gitlab.MergeRequest{
+		{
+			IID:          24,
+			Title:        "WIP: Implement OAuth2 provider",
+			Description:  "Adding OAuth2 support for third-party apps",
+			State:        "opened",
+			Draft:        true,
+			SourceBranch: "feature/oauth2",
+			TargetBranch: "main",
+			Author:       gitlab.User{Name: "Carol Jones", Username: "cjones"},
+			Reviewers:    []gitlab.User{},
+			CreatedAt:    now.Add(-30 * time.Minute),
+			WebURL:       "https://gitlab.com/acme-corp/api-gateway/-/merge_requests/24",
+		},
 		{
 			IID:          23,
 			Title:        "Add rate limiting middleware",
@@ -194,15 +219,28 @@ func mockMergeRequests() []gitlab.MergeRequest {
 		},
 		{
 			IID:          22,
-			Title:        "Fix authentication timeout",
+			Title:        "Fix authentication timeout issue",
 			Description:  "Increases token refresh timeout",
 			State:        "opened",
 			SourceBranch: "fix/auth-timeout",
 			TargetBranch: "main",
 			Author:       gitlab.User{Name: "Bob Smith", Username: "bsmith"},
 			Reviewers:    []gitlab.User{{Username: "achen", Name: "Alice Chen"}, {Username: "cjones", Name: "Carol Jones"}},
-			CreatedAt:    now.Add(-24 * time.Hour),
+			HasConflicts: true,
+			CreatedAt:    now.Add(-2 * 24 * time.Hour),
 			WebURL:       "https://gitlab.com/acme-corp/api-gateway/-/merge_requests/22",
+		},
+		{
+			IID:          21,
+			Title:        "Update logging format to JSON",
+			Description:  "Structured logging for better observability",
+			State:        "opened",
+			SourceBranch: "feature/json-logs",
+			TargetBranch: "main",
+			Author:       gitlab.User{Name: "Alice Chen", Username: "achen"},
+			Reviewers:    []gitlab.User{{Username: "cjones", Name: "Carol Jones"}},
+			CreatedAt:    now.Add(-5 * 24 * time.Hour),
+			WebURL:       "https://gitlab.com/acme-corp/api-gateway/-/merge_requests/21",
 		},
 	}
 }
@@ -214,6 +252,39 @@ func mockBranches() []gitlab.Branch {
 		{Name: "feature/rate-limit", Default: false, Protected: false, Commit: gitlab.Commit{Title: "Implement token bucket algorithm", AuthorName: "Alice Chen"}},
 		{Name: "feature/auth", Default: false, Protected: false, Commit: gitlab.Commit{Title: "Fix JWT validation for expired tokens", AuthorName: "Bob Smith"}},
 		{Name: "fix/auth-timeout", Default: false, Protected: false, Commit: gitlab.Commit{Title: "Increase timeout to 30 seconds", AuthorName: "Bob Smith"}},
+	}
+}
+
+func mockPipelineJobs() map[int][]gitlab.Job {
+	return map[int][]gitlab.Job{
+		// Running pipeline - test running, build pending
+		1002: {
+			{ID: 5001, Name: "lint", Stage: "test", Status: "success"},
+			{ID: 5002, Name: "unit-test", Stage: "test", Status: "running"},
+			{ID: 5003, Name: "build", Stage: "build", Status: "pending"},
+			{ID: 5004, Name: "deploy", Stage: "deploy", Status: "pending"},
+		},
+		// Success pipeline - all passed
+		1001: {
+			{ID: 4001, Name: "lint", Stage: "test", Status: "success"},
+			{ID: 4002, Name: "unit-test", Stage: "test", Status: "success"},
+			{ID: 4003, Name: "build", Stage: "build", Status: "success"},
+			{ID: 4004, Name: "deploy", Stage: "deploy", Status: "success"},
+		},
+		// Failed pipeline - test failed
+		1000: {
+			{ID: 3001, Name: "lint", Stage: "test", Status: "success"},
+			{ID: 3002, Name: "unit-test", Stage: "test", Status: "failed"},
+			{ID: 3003, Name: "build", Stage: "build", Status: "canceled"},
+			{ID: 3004, Name: "deploy", Stage: "deploy", Status: "canceled"},
+		},
+		// Old success pipeline
+		999: {
+			{ID: 2001, Name: "lint", Stage: "test", Status: "success"},
+			{ID: 2002, Name: "unit-test", Stage: "test", Status: "success"},
+			{ID: 2003, Name: "build", Stage: "build", Status: "success"},
+			{ID: 2004, Name: "deploy", Stage: "deploy", Status: "success"},
+		},
 	}
 }
 
