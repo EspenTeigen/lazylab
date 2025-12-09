@@ -586,6 +586,15 @@ type MainScreen struct {
 	visualStartLine  int    // Start of visual selection
 	visualEndLine    int    // End of visual selection (follows cursor)
 
+	// Runners popup (shows all running/pending jobs across projects)
+	showRunnersPopup bool
+	runningJobs      []gitlab.Job
+	pendingJobs      []gitlab.Job
+	runnersLoading   bool
+	runnersLastKey   string
+	runnersCursor    int
+	runnersTab       int // 0 = running, 1 = pending
+
 	// Demo mode (no API calls)
 	isDemo bool
 }
@@ -1024,6 +1033,34 @@ type jobLogRefreshedMsg struct{ log string }
 // jobsRefreshedMsg carries refreshed job statuses
 type jobsRefreshedMsg struct{ jobs []gitlab.Job }
 
+// runnersLoadedMsg carries all running and pending jobs
+type runnersLoadedMsg struct {
+	running []gitlab.Job
+	pending []gitlab.Job
+}
+
+// runnersTickMsg triggers auto-refresh of runners popup
+type runnersTickMsg time.Time
+
+// runnersTickCmd returns a command that sends a tick for runners refresh
+func runnersTickCmd() tea.Cmd {
+	return tea.Tick(config.PipelineRefreshInterval, func(t time.Time) tea.Msg {
+		return runnersTickMsg(t)
+	})
+}
+
+// loadAllJobs fetches all running and pending jobs across projects
+func (m *MainScreen) loadAllJobs() tea.Cmd {
+	if m.isDemo {
+		return nil
+	}
+	return func() tea.Msg {
+		running, _ := m.client.ListRunningJobs()
+		pending, _ := m.client.ListPendingJobs()
+		return runnersLoadedMsg{running: running, pending: pending}
+	}
+}
+
 // jobLogTickCmd returns a command that sends a tick after the configured interval
 func jobLogTickCmd() tea.Cmd {
 	return tea.Tick(config.JobLogRefreshInterval, func(t time.Time) tea.Msg {
@@ -1334,6 +1371,21 @@ func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case runnersLoadedMsg:
+		m.runningJobs = msg.running
+		m.pendingJobs = msg.pending
+		m.runnersLoading = false
+		if m.showRunnersPopup {
+			return m, runnersTickCmd()
+		}
+		return m, nil
+
+	case runnersTickMsg:
+		if m.showRunnersPopup {
+			return m, m.loadAllJobs()
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -1351,6 +1403,9 @@ func (m *MainScreen) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.showBranchPopup {
 		return m.handleBranchPopup(msg)
+	}
+	if m.showRunnersPopup {
+		return m.handleRunnersPopup(msg)
 	}
 
 	if key.Matches(msg, m.keymap.Quit) {
@@ -1419,6 +1474,15 @@ func (m *MainScreen) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		return m, nil
+	}
+
+	// 'R' to open runners/jobs popup (shows all running/pending jobs)
+	if msg.String() == "R" {
+		m.showRunnersPopup = true
+		m.runnersCursor = 0
+		m.runnersTab = 0
+		m.runnersLoading = true
+		return m, m.loadAllJobs()
 	}
 
 	// Panel navigation with Shift+HJKL
@@ -1899,6 +1963,57 @@ func (m *MainScreen) handleBranchPopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m *MainScreen) handleRunnersPopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Get current job list based on tab
+	jobs := m.runningJobs
+	if m.runnersTab == 1 {
+		jobs = m.pendingJobs
+	}
+
+	switch msg.String() {
+	case "q", "esc", "escape":
+		m.showRunnersPopup = false
+		return m, nil
+	case "j", "down":
+		if m.runnersCursor < len(jobs)-1 {
+			m.runnersCursor++
+		}
+	case "k", "up":
+		if m.runnersCursor > 0 {
+			m.runnersCursor--
+		}
+	case "tab", "l", "right":
+		// Switch between running/pending tabs
+		m.runnersTab = (m.runnersTab + 1) % 2
+		m.runnersCursor = 0
+	case "shift+tab", "h", "left":
+		m.runnersTab = (m.runnersTab + 1) % 2
+		m.runnersCursor = 0
+	case "r":
+		// Manual refresh
+		m.runnersLoading = true
+		return m, m.loadAllJobs()
+	case "g":
+		if m.runnersLastKey == "g" {
+			m.runnersCursor = 0
+			m.runnersLastKey = ""
+			return m, nil
+		}
+		m.runnersLastKey = "g"
+		return m, nil
+	case "G":
+		m.runnersCursor = len(jobs) - 1
+		if m.runnersCursor < 0 {
+			m.runnersCursor = 0
+		}
+	}
+	// Clear key sequence for non-sequence keys
+	if msg.String() != "g" {
+		m.runnersLastKey = ""
+	}
+	return m, nil
+}
+
 func (m *MainScreen) handleJobLogPopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	key := msg.String()
 
@@ -2224,6 +2339,9 @@ func (m *MainScreen) View() string {
 	}
 	if m.showBranchPopup {
 		return m.renderBranchPopup()
+	}
+	if m.showRunnersPopup {
+		return m.renderRunnersPopup()
 	}
 
 	// Calculate dimensions using config ratios
@@ -2902,6 +3020,179 @@ func (m *MainScreen) renderBranchPopup() string {
 	return result.String()
 }
 
+func (m *MainScreen) renderRunnersPopup() string {
+	// Larger popup for runners view
+	popupWidth := int(float64(m.width) * 0.8)
+	popupHeight := int(float64(m.height) * 0.8)
+
+	if popupWidth < 60 {
+		popupWidth = 60
+	}
+	if popupHeight < 15 {
+		popupHeight = 15
+	}
+	if popupWidth > m.width-4 {
+		popupWidth = m.width - 4
+	}
+	if popupHeight > m.height-4 {
+		popupHeight = m.height - 4
+	}
+
+	var content strings.Builder
+
+	// Tab headers
+	runningTab := fmt.Sprintf("Running (%d)", len(m.runningJobs))
+	pendingTab := fmt.Sprintf("Pending (%d)", len(m.pendingJobs))
+
+	if m.runnersTab == 0 {
+		content.WriteString(styles.SelectedItem.Render("["+runningTab+"]") + " " + styles.DimmedText.Render(pendingTab))
+	} else {
+		content.WriteString(styles.DimmedText.Render(runningTab) + " " + styles.SelectedItem.Render("["+pendingTab+"]"))
+	}
+	content.WriteString("\n\n")
+
+	// Get current job list
+	jobs := m.runningJobs
+	if m.runnersTab == 1 {
+		jobs = m.pendingJobs
+	}
+
+	if m.runnersLoading {
+		content.WriteString(styles.DimmedText.Render("Loading jobs..."))
+	} else if len(jobs) == 0 {
+		if m.runnersTab == 0 {
+			content.WriteString(styles.DimmedText.Render("No running jobs"))
+		} else {
+			content.WriteString(styles.DimmedText.Render("No pending jobs"))
+		}
+	} else {
+		visibleLines := popupHeight - 8
+		if visibleLines < 5 {
+			visibleLines = 5
+		}
+
+		// Calculate scroll offset
+		startIdx := 0
+		if m.runnersCursor >= visibleLines {
+			startIdx = m.runnersCursor - visibleLines + 1
+		}
+		endIdx := startIdx + visibleLines
+		if endIdx > len(jobs) {
+			endIdx = len(jobs)
+		}
+
+		// Column header
+		header := fmt.Sprintf("%-20s %-30s %-15s %s", "PROJECT", "JOB", "RUNNER", "DURATION")
+		content.WriteString(styles.DimmedText.Render(header) + "\n")
+		content.WriteString(styles.DimmedText.Render(strings.Repeat("─", popupWidth-4)) + "\n")
+
+		for i := startIdx; i < endIdx; i++ {
+			job := jobs[i]
+			icon := styles.PipelineIcon(job.Status)
+			statusStyle := styles.PipelineStatus(job.Status)
+
+			// Project name (truncate if needed)
+			project := job.Project.Name
+			if len(project) > 18 {
+				project = project[:17] + "…"
+			}
+
+			// Job name (truncate if needed)
+			jobName := job.Name
+			if job.Stage != "" && job.Stage != job.Name {
+				jobName = job.Stage + "/" + job.Name
+			}
+			if len(jobName) > 28 {
+				jobName = jobName[:27] + "…"
+			}
+
+			// Runner info
+			runnerName := "-"
+			if job.Runner != nil {
+				runnerName = job.Runner.Description
+				if runnerName == "" {
+					runnerName = job.Runner.Name
+				}
+				if runnerName == "" {
+					runnerName = fmt.Sprintf("#%d", job.Runner.ID)
+				}
+			}
+			if len(runnerName) > 13 {
+				runnerName = runnerName[:12] + "…"
+			}
+
+			// Duration
+			duration := "-"
+			if job.Duration > 0 {
+				duration = fmt.Sprintf("%.0fs", job.Duration)
+			} else if job.StartedAt != nil {
+				duration = timeAgo(*job.StartedAt)
+			}
+
+			line := fmt.Sprintf("%s %-20s %-30s %-15s %s",
+				statusStyle.Render(icon),
+				project,
+				jobName,
+				runnerName,
+				duration)
+
+			if i == m.runnersCursor {
+				line = styles.SelectedItem.Render("> ") + line
+			} else {
+				line = "  " + line
+			}
+			content.WriteString(line + "\n")
+		}
+
+		// Scroll indicator
+		if len(jobs) > visibleLines {
+			content.WriteString(styles.DimmedText.Render(fmt.Sprintf("\n[%d/%d]", m.runnersCursor+1, len(jobs))))
+		}
+	}
+
+	// Build popup panel
+	title := "CI/CD Jobs"
+	if m.runnersLoading {
+		title += " (loading...)"
+	}
+	popup := components.SimpleBorderedPanel(title, content.String(), popupWidth, popupHeight, true)
+
+	// Center the popup
+	popupLines := strings.Split(popup, "\n")
+	topPadding := (m.height - len(popupLines)) / 2
+	leftPadding := (m.width - popupWidth) / 2
+	if topPadding < 0 {
+		topPadding = 0
+	}
+	if leftPadding < 0 {
+		leftPadding = 0
+	}
+
+	var result strings.Builder
+	for i := 0; i < topPadding; i++ {
+		result.WriteString("\n")
+	}
+	for _, line := range popupLines {
+		result.WriteString(strings.Repeat(" ", leftPadding) + line + "\n")
+	}
+
+	// Status bar at bottom
+	statusContent := styles.StatusBarKey.Render("Esc") + styles.StatusBarDesc.Render(" close") + " │ " +
+		styles.StatusBarKey.Render("Tab") + styles.StatusBarDesc.Render(" switch") + " │ " +
+		styles.StatusBarKey.Render("j/k") + styles.StatusBarDesc.Render(" navigate") + " │ " +
+		styles.StatusBarKey.Render("r") + styles.StatusBarDesc.Render(" refresh")
+
+	// Pad to bottom
+	currentLines := topPadding + len(popupLines)
+	for i := currentLines; i < m.height-1; i++ {
+		result.WriteString("\n")
+	}
+
+	result.WriteString(styles.StatusBar.Width(m.width).Render(statusContent))
+
+	return result.String()
+}
+
 func (m *MainScreen) renderStatusBar() string {
 	// If there's a status message, show it prominently
 	if m.statusMsg != "" {
@@ -2958,6 +3249,7 @@ func (m *MainScreen) renderStatusBar() string {
 			styles.StatusBarKey.Render("Enter") + styles.StatusBarDesc.Render(" select") + " │ " +
 			styles.StatusBarKey.Render("S") + styles.StatusBarDesc.Render(" ssh") + " " +
 			styles.StatusBarKey.Render("U") + styles.StatusBarDesc.Render(" https") + " │ " +
+			styles.StatusBarKey.Render("R") + styles.StatusBarDesc.Render(" jobs") + " │ " +
 			styles.StatusBarKey.Render("q") + styles.StatusBarDesc.Render(" quit")
 	}
 

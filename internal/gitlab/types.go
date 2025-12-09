@@ -137,6 +137,18 @@ type TreeEntry struct {
 	LastCommit *Commit // Populated separately
 }
 
+// Runner represents a GitLab CI runner
+type Runner struct {
+	ID          int    `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Active      bool   `json:"active"`
+	IsShared    bool   `json:"is_shared"`
+	RunnerType  string `json:"runner_type"`
+	Online      bool   `json:"online"`
+	Status      string `json:"status"`
+}
+
 // Job represents a CI/CD job within a pipeline
 type Job struct {
 	ID         int        `json:"id"`
@@ -149,8 +161,15 @@ type Job struct {
 	FinishedAt *time.Time `json:"finished_at"`
 	Duration   float64    `json:"duration"`
 	WebURL     string     `json:"web_url"`
+	Runner     *Runner    `json:"runner"`
 	Pipeline   struct {
-		ID  int    `json:"id"`
-		Ref string `json:"ref"`
+		ID        int    `json:"id"`
+		Ref       string `json:"ref"`
+		ProjectID int    `json:"project_id"`
 	} `json:"pipeline"`
+	Project struct {
+		ID                int    `json:"id"`
+		Name              string `json:"name"`
+		PathWithNamespace string `json:"path_with_namespace"`
+	} `json:"project"`
 }

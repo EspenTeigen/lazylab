@@ -330,6 +330,68 @@ func (c *Client) SearchGroups(query string) ([]Group, error) {
 	return groups, nil
 }
 
+// ListProjectJobs fetches jobs for a project with optional status filter
+func (c *Client) ListProjectJobs(projectID string, scope string) ([]Job, error) {
+	var jobs []Job
+	path := fmt.Sprintf("/projects/%s/jobs?per_page=%d", url.PathEscape(projectID), c.perPage)
+	if scope != "" {
+		path += "&scope[]=" + url.QueryEscape(scope)
+	}
+	if err := c.get(path, &jobs); err != nil {
+		return nil, err
+	}
+	return jobs, nil
+}
+
+// ListRunningJobs fetches all running jobs across accessible projects
+func (c *Client) ListRunningJobs() ([]Job, error) {
+	// Get all accessible projects first, then query their running jobs
+	// This is a workaround since GitLab doesn't have a global jobs endpoint for non-admins
+	projects, err := c.ListProjects()
+	if err != nil {
+		return nil, err
+	}
+
+	var allJobs []Job
+	for _, p := range projects {
+		jobs, err := c.ListProjectJobs(fmt.Sprintf("%d", p.ID), "running")
+		if err != nil {
+			continue // Skip projects we can't access
+		}
+		// Add project info to jobs
+		for i := range jobs {
+			jobs[i].Project.ID = p.ID
+			jobs[i].Project.Name = p.Name
+			jobs[i].Project.PathWithNamespace = p.PathWithNamespace
+		}
+		allJobs = append(allJobs, jobs...)
+	}
+	return allJobs, nil
+}
+
+// ListPendingJobs fetches all pending jobs across accessible projects
+func (c *Client) ListPendingJobs() ([]Job, error) {
+	projects, err := c.ListProjects()
+	if err != nil {
+		return nil, err
+	}
+
+	var allJobs []Job
+	for _, p := range projects {
+		jobs, err := c.ListProjectJobs(fmt.Sprintf("%d", p.ID), "pending")
+		if err != nil {
+			continue
+		}
+		for i := range jobs {
+			jobs[i].Project.ID = p.ID
+			jobs[i].Project.Name = p.Name
+			jobs[i].Project.PathWithNamespace = p.PathWithNamespace
+		}
+		allJobs = append(allJobs, jobs...)
+	}
+	return allJobs, nil
+}
+
 // GetJobLog fetches the log/trace for a specific job
 func (c *Client) GetJobLog(projectID string, jobID int) (string, error) {
 	reqURL := fmt.Sprintf("%s/api/v4/projects/%s/jobs/%d/trace",
