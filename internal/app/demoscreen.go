@@ -98,15 +98,16 @@ func mockGroupProjects() map[int][]gitlab.Project {
 }
 
 func mockFiles() []gitlab.TreeEntry {
+	now := time.Now()
 	return []gitlab.TreeEntry{
-		{Name: "src", Type: "tree", Path: "src"},
-		{Name: "tests", Type: "tree", Path: "tests"},
-		{Name: "docs", Type: "tree", Path: "docs"},
-		{Name: ".gitlab-ci.yml", Type: "blob", Path: ".gitlab-ci.yml"},
-		{Name: "Dockerfile", Type: "blob", Path: "Dockerfile"},
-		{Name: "README.md", Type: "blob", Path: "README.md"},
-		{Name: "go.mod", Type: "blob", Path: "go.mod"},
-		{Name: "main.go", Type: "blob", Path: "main.go"},
+		{Name: "src", Type: "tree", Path: "src", LastCommit: &gitlab.Commit{Title: "Add rate limiting middleware", AuthorName: "Alice Chen", AuthoredDate: now.Add(-2 * time.Hour)}},
+		{Name: "tests", Type: "tree", Path: "tests", LastCommit: &gitlab.Commit{Title: "Add unit tests for auth", AuthorName: "Bob Smith", AuthoredDate: now.Add(-5 * time.Hour)}},
+		{Name: "docs", Type: "tree", Path: "docs", LastCommit: &gitlab.Commit{Title: "Update API documentation", AuthorName: "Carol Jones", AuthoredDate: now.Add(-3 * 24 * time.Hour)}},
+		{Name: ".gitlab-ci.yml", Type: "blob", Path: ".gitlab-ci.yml", LastCommit: &gitlab.Commit{Title: "Add deploy stage to CI", AuthorName: "Alice Chen", AuthoredDate: now.Add(-24 * time.Hour)}},
+		{Name: "Dockerfile", Type: "blob", Path: "Dockerfile", LastCommit: &gitlab.Commit{Title: "Optimize Docker image size", AuthorName: "Bob Smith", AuthoredDate: now.Add(-48 * time.Hour)}},
+		{Name: "README.md", Type: "blob", Path: "README.md", LastCommit: &gitlab.Commit{Title: "Add quick start guide", AuthorName: "Carol Jones", AuthoredDate: now.Add(-7 * 24 * time.Hour)}},
+		{Name: "go.mod", Type: "blob", Path: "go.mod", LastCommit: &gitlab.Commit{Title: "Update dependencies", AuthorName: "Alice Chen", AuthoredDate: now.Add(-12 * time.Hour)}},
+		{Name: "main.go", Type: "blob", Path: "main.go", LastCommit: &gitlab.Commit{Title: "Implement graceful shutdown", AuthorName: "Bob Smith", AuthoredDate: now.Add(-4 * time.Hour)}},
 	}
 }
 
@@ -147,6 +148,7 @@ func mockPipelines() []gitlab.Pipeline {
 			CreatedAt: now.Add(-2 * time.Hour),
 			UpdatedAt: now.Add(-1 * time.Hour),
 			WebURL:    "https://gitlab.com/acme-corp/api-gateway/-/pipelines/1001",
+			User:      gitlab.User{Username: "achen", Name: "Alice Chen"},
 		},
 		{
 			ID:        1000,
@@ -158,6 +160,7 @@ func mockPipelines() []gitlab.Pipeline {
 			CreatedAt: now.Add(-24 * time.Hour),
 			UpdatedAt: now.Add(-23 * time.Hour),
 			WebURL:    "https://gitlab.com/acme-corp/api-gateway/-/pipelines/1000",
+			User:      gitlab.User{Username: "bsmith", Name: "Bob Smith"},
 		},
 		{
 			ID:        999,
@@ -169,6 +172,7 @@ func mockPipelines() []gitlab.Pipeline {
 			CreatedAt: now.Add(-48 * time.Hour),
 			UpdatedAt: now.Add(-47 * time.Hour),
 			WebURL:    "https://gitlab.com/acme-corp/api-gateway/-/pipelines/999",
+			User:      gitlab.User{Username: "achen", Name: "Alice Chen"},
 		},
 	}
 }
@@ -184,6 +188,7 @@ func mockMergeRequests() []gitlab.MergeRequest {
 			SourceBranch: "feature/rate-limit",
 			TargetBranch: "main",
 			Author:       gitlab.User{Name: "Alice Chen", Username: "achen"},
+			Reviewers:    []gitlab.User{{Username: "bsmith", Name: "Bob Smith"}},
 			CreatedAt:    now.Add(-3 * time.Hour),
 			WebURL:       "https://gitlab.com/acme-corp/api-gateway/-/merge_requests/23",
 		},
@@ -195,6 +200,7 @@ func mockMergeRequests() []gitlab.MergeRequest {
 			SourceBranch: "fix/auth-timeout",
 			TargetBranch: "main",
 			Author:       gitlab.User{Name: "Bob Smith", Username: "bsmith"},
+			Reviewers:    []gitlab.User{{Username: "achen", Name: "Alice Chen"}, {Username: "cjones", Name: "Carol Jones"}},
 			CreatedAt:    now.Add(-24 * time.Hour),
 			WebURL:       "https://gitlab.com/acme-corp/api-gateway/-/merge_requests/22",
 		},
@@ -203,11 +209,11 @@ func mockMergeRequests() []gitlab.MergeRequest {
 
 func mockBranches() []gitlab.Branch {
 	return []gitlab.Branch{
-		{Name: "main", Default: true, Protected: true},
-		{Name: "develop", Default: false, Protected: true},
-		{Name: "feature/rate-limit", Default: false, Protected: false},
-		{Name: "feature/auth", Default: false, Protected: false},
-		{Name: "fix/auth-timeout", Default: false, Protected: false},
+		{Name: "main", Default: true, Protected: true, Commit: gitlab.Commit{Title: "Merge branch 'feature/logging' into main", AuthorName: "Alice Chen"}},
+		{Name: "develop", Default: false, Protected: true, Commit: gitlab.Commit{Title: "Add prometheus metrics endpoint", AuthorName: "Bob Smith"}},
+		{Name: "feature/rate-limit", Default: false, Protected: false, Commit: gitlab.Commit{Title: "Implement token bucket algorithm", AuthorName: "Alice Chen"}},
+		{Name: "feature/auth", Default: false, Protected: false, Commit: gitlab.Commit{Title: "Fix JWT validation for expired tokens", AuthorName: "Bob Smith"}},
+		{Name: "fix/auth-timeout", Default: false, Protected: false, Commit: gitlab.Commit{Title: "Increase timeout to 30 seconds", AuthorName: "Bob Smith"}},
 	}
 }
 

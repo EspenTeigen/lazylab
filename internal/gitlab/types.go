@@ -61,6 +61,7 @@ type Pipeline struct {
 	UpdatedAt time.Time `json:"updated_at"`
 	WebURL    string    `json:"web_url"`
 	Name      string    `json:"name"`
+	User      User      `json:"user"`
 }
 
 // User represents a GitLab user
@@ -128,11 +129,12 @@ type Branch struct {
 
 // TreeEntry represents a file or directory in a repository tree
 type TreeEntry struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-	Type string `json:"type"` // "tree" for directory, "blob" for file
-	Path string `json:"path"`
-	Mode string `json:"mode"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Type       string `json:"type"` // "tree" for directory, "blob" for file
+	Path       string `json:"path"`
+	Mode       string `json:"mode"`
+	LastCommit *Commit // Populated separately
 }
 
 // Job represents a CI/CD job within a pipeline

@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alecthomas/chroma/v2"
@@ -35,8 +36,10 @@ func copyToClipboard(text string) error {
 	case "darwin":
 		cmd = exec.Command("pbcopy")
 	case "linux":
-		// Try xclip first, fall back to xsel
-		if _, err := exec.LookPath("xclip"); err == nil {
+		// Try wl-copy for Wayland, then xclip/xsel for X11
+		if _, err := exec.LookPath("wl-copy"); err == nil {
+			cmd = exec.Command("wl-copy")
+		} else if _, err := exec.LookPath("xclip"); err == nil {
 			cmd = exec.Command("xclip", "-selection", "clipboard")
 		} else {
 			cmd = exec.Command("xsel", "--clipboard", "--input")
@@ -69,6 +72,56 @@ func copyToClipboard(text string) error {
 var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
 // highlightCode applies syntax highlighting to code based on filename
+// truncateString truncates a string to maxLen, adding "..." if truncated
+func truncateString(s string, maxLen int) string {
+	if maxLen <= 3 {
+		maxLen = 10
+	}
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
+
+// timeAgo formats a time as a human-readable relative time
+func timeAgo(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		m := int(d.Minutes())
+		if m == 1 {
+			return "1m ago"
+		}
+		return fmt.Sprintf("%dm ago", m)
+	case d < 24*time.Hour:
+		h := int(d.Hours())
+		if h == 1 {
+			return "1h ago"
+		}
+		return fmt.Sprintf("%dh ago", h)
+	case d < 7*24*time.Hour:
+		days := int(d.Hours() / 24)
+		if days == 1 {
+			return "1d ago"
+		}
+		return fmt.Sprintf("%dd ago", days)
+	case d < 30*24*time.Hour:
+		weeks := int(d.Hours() / 24 / 7)
+		if weeks == 1 {
+			return "1w ago"
+		}
+		return fmt.Sprintf("%dw ago", weeks)
+	default:
+		months := int(d.Hours() / 24 / 30)
+		if months == 1 {
+			return "1mo ago"
+		}
+		return fmt.Sprintf("%dmo ago", months)
+	}
+}
+
 func highlightCode(code, filename string) string {
 	// Get lexer based on filename
 	lexer := lexers.Match(filename)
@@ -238,7 +291,6 @@ const (
 	PanelNavigator PanelID = iota
 	PanelContent
 	PanelReadme
-	PanelDetail
 )
 
 // TreeNode represents an item in the navigator tree
@@ -322,7 +374,6 @@ type MainScreen struct {
 
 	// Viewports for scrolling
 	readmeViewport viewport.Model
-	detailViewport viewport.Model
 	jobLogViewport viewport.Model
 	fileViewport   viewport.Model
 	readmeReady    bool
@@ -349,6 +400,15 @@ type MainScreen struct {
 	// Error handling
 	lastError string
 	retryCmd  tea.Cmd // Command to retry on 'r' key
+
+	// Visual line mode for job log
+	visualLineMode   bool
+	visualStartLine  int
+	visualEndLine    int
+
+	// Job log popup focus (true = log panel, false = job list)
+	jobLogFocused bool
+	jobLogCursor  int // Current cursor line in log
 
 	// Demo mode (no API calls)
 	isDemo bool
@@ -541,6 +601,9 @@ func (m *MainScreen) loadProjectContentForBranch(branch string) tea.Cmd {
 			return errMsg{err: err}
 		}
 
+		// Fetch last commit for each entry in parallel
+		m.fetchLastCommits(projectID, branch, entries)
+
 		// Try to load README
 		var readme string
 		for _, e := range entries {
@@ -576,8 +639,38 @@ func (m *MainScreen) loadDirectory(path string) tea.Cmd {
 		if err != nil {
 			return errMsg{err: err}
 		}
+
+		// Fetch last commit for each entry in parallel
+		m.fetchLastCommits(projectID, ref, entries)
+
 		return treeLoadedMsg{entries: entries, path: path}
 	}
+}
+
+// fetchLastCommits fetches the last commit for each entry in parallel
+func (m *MainScreen) fetchLastCommits(projectID, ref string, entries []gitlab.TreeEntry) {
+	if m.client == nil || len(entries) == 0 {
+		return
+	}
+
+	var wg sync.WaitGroup
+	// Limit concurrent requests
+	sem := make(chan struct{}, 10)
+
+	for i := range entries {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			commit, err := m.client.GetLastCommitForPath(projectID, ref, entries[idx].Path)
+			if err == nil && commit != nil {
+				entries[idx].LastCommit = commit
+			}
+		}(i)
+	}
+	wg.Wait()
 }
 
 func (m *MainScreen) loadFile(filePath string) tea.Cmd {
@@ -983,6 +1076,8 @@ func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.jobLogReady = false
 		m.loading = false
 		m.lastError = ""
+		// Start at bottom where errors usually are
+		m.jobLogCursor = strings.Count(msg.log, "\n")
 		// Start auto-refresh for live log viewing
 		return m, jobLogTickCmd()
 
@@ -1009,8 +1104,8 @@ func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			wrappedLog := wrapText(cleanLog, m.jobLogViewport.Width)
 			m.jobLogViewport.SetContent(wrappedLog)
 
-			// Restore scroll position
-			if wasAtBottom {
+			// Auto-scroll to bottom when not focused on log panel, or was already at bottom
+			if !m.jobLogFocused || wasAtBottom {
 				m.jobLogViewport.GotoBottom()
 			} else {
 				m.jobLogViewport.SetYOffset(currentLine)
@@ -1081,23 +1176,19 @@ func (m *MainScreen) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Panel navigation with Shift+HJKL
 	// Layout:
-	// [1 Navigator] [2 Content ] [4 Detail]
+	// [1 Navigator] [2 Content ]
 	//               [3 README  ]
 	switch msg.String() {
 	case "H", "shift+left":
 		switch m.focusedPanel {
 		case PanelContent, PanelReadme:
 			m.focusedPanel = PanelNavigator
-		case PanelDetail:
-			m.focusedPanel = PanelContent
 		}
 		return m, nil
 	case "L", "shift+right":
 		switch m.focusedPanel {
 		case PanelNavigator:
 			m.focusedPanel = PanelContent
-		case PanelContent, PanelReadme:
-			m.focusedPanel = PanelDetail
 		}
 		return m, nil
 	case "K", "shift+up":
@@ -1121,9 +1212,6 @@ func (m *MainScreen) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "3":
 		m.focusedPanel = PanelReadme
 		return m, nil
-	case "4":
-		m.focusedPanel = PanelDetail
-		return m, nil
 	}
 
 	switch m.focusedPanel {
@@ -1133,8 +1221,6 @@ func (m *MainScreen) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleContentNav(msg)
 	case PanelReadme:
 		return m.handleReadmeNav(msg)
-	case PanelDetail:
-		return m.handleDetailNav(msg)
 	}
 
 	return m, nil
@@ -1263,8 +1349,6 @@ func (m *MainScreen) handleContentNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.contentTab < TabPipelines {
 			return m, m.switchTab(m.contentTab + 1)
 		}
-		// At last tab, go to detail panel
-		m.focusedPanel = PanelDetail
 
 	case key.Matches(msg, m.keymap.Select):
 		// Enter - drill into directory or view file
@@ -1314,8 +1398,6 @@ func (m *MainScreen) handleContentNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.retryCmd = cmd
 			return m, cmd
 		}
-		// For other tabs, focus detail panel
-		m.focusedPanel = PanelDetail
 
 	case key.Matches(msg, m.keymap.Down):
 		// If viewing file, scroll down
@@ -1385,7 +1467,7 @@ func (m *MainScreen) handleReadmeNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.keymap.Left):
 		m.focusedPanel = PanelNavigator
 	case key.Matches(msg, m.keymap.Right):
-		m.focusedPanel = PanelDetail
+		m.focusedPanel = PanelContent
 	case key.Matches(msg, m.keymap.Up):
 		m.readmeViewport.ScrollUp(1)
 	case key.Matches(msg, m.keymap.Down):
@@ -1396,18 +1478,6 @@ func (m *MainScreen) handleReadmeNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.readmeViewport.HalfPageDown()
 	case "ctrl+u":
 		m.readmeViewport.HalfPageUp()
-	}
-	return m, nil
-}
-
-func (m *MainScreen) handleDetailNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch {
-	case key.Matches(msg, m.keymap.Left):
-		m.focusedPanel = PanelContent
-	case key.Matches(msg, m.keymap.Down):
-		m.detailViewport.ScrollDown(1)
-	case key.Matches(msg, m.keymap.Up):
-		m.detailViewport.ScrollUp(1)
 	}
 	return m, nil
 }
@@ -1451,59 +1521,186 @@ func (m *MainScreen) handleBranchPopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *MainScreen) handleJobLogPopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "q", "esc", "escape":
+	case "q":
+		m.showJobLogPopup = false
+		m.jobs = nil
+		m.jobLog = ""
+		m.statusMsg = ""
+		m.lastError = ""
+		m.visualLineMode = false
+		m.jobLogFocused = false
+		return m, nil
+	case "esc", "escape":
+		// Exit visual mode first, then switch to job list, then close
+		if m.visualLineMode {
+			m.visualLineMode = false
+			m.statusMsg = ""
+			return m, nil
+		}
+		if m.jobLogFocused {
+			m.jobLogFocused = false
+			return m, nil
+		}
 		m.showJobLogPopup = false
 		m.jobs = nil
 		m.jobLog = ""
 		m.statusMsg = ""
 		m.lastError = ""
 		return m, nil
-	case "j", "down":
-		// Next job
-		if m.selectedJobIdx < len(m.jobs)-1 && !m.isDemo {
-			m.selectedJobIdx++
-			m.jobLog = ""
-			m.jobLogReady = false
-			m.loading = true
-			m.loadingMsg = "Loading job log..."
+	case "h", "left":
+		// Switch to job list panel
+		if m.jobLogFocused && !m.visualLineMode {
+			m.jobLogFocused = false
+		}
+		return m, nil
+	case "l", "right", "enter":
+		// Switch to log panel
+		if !m.jobLogFocused {
+			m.jobLogFocused = true
+		}
+		return m, nil
+	case "V":
+		// Toggle visual line mode (only in log panel)
+		if !m.jobLogFocused {
+			return m, nil
+		}
+		if m.visualLineMode {
+			m.visualLineMode = false
 			m.statusMsg = ""
-			cmd := m.loadJobLog(m.jobs[m.selectedJobIdx].ID)
-			m.retryCmd = cmd
-			return m, cmd
+		} else {
+			m.visualLineMode = true
+			m.visualStartLine = m.jobLogCursor
+			m.visualEndLine = m.jobLogCursor
+			m.statusMsg = "-- VISUAL LINE --"
+		}
+		return m, nil
+	case "j", "down":
+		if m.jobLogFocused {
+			if m.visualLineMode {
+				// Extend selection down
+				m.visualEndLine++
+				m.jobLogCursor = m.visualEndLine
+			} else {
+				// Move cursor down
+				m.jobLogCursor++
+			}
+			// Keep cursor in view
+			viewportBottom := m.jobLogViewport.YOffset + m.jobLogViewport.Height - 1
+			if m.jobLogCursor > viewportBottom {
+				m.jobLogViewport.ScrollDown(1)
+			}
+		} else {
+			// Next job in list
+			if m.selectedJobIdx < len(m.jobs)-1 {
+				m.selectedJobIdx++
+				if !m.isDemo {
+					m.jobLog = ""
+					m.jobLogReady = false
+					m.loading = true
+					m.loadingMsg = "Loading job log..."
+					m.statusMsg = ""
+					cmd := m.loadJobLog(m.jobs[m.selectedJobIdx].ID)
+					m.retryCmd = cmd
+					return m, cmd
+				}
+			}
 		}
 	case "k", "up":
-		// Previous job
-		if m.selectedJobIdx > 0 && !m.isDemo {
-			m.selectedJobIdx--
-			m.jobLog = ""
-			m.jobLogReady = false
-			m.loading = true
-			m.loadingMsg = "Loading job log..."
-			m.statusMsg = ""
-			cmd := m.loadJobLog(m.jobs[m.selectedJobIdx].ID)
-			m.retryCmd = cmd
-			return m, cmd
+		if m.jobLogFocused {
+			if m.visualLineMode {
+				// Extend selection up
+				if m.visualEndLine > 0 {
+					m.visualEndLine--
+					m.jobLogCursor = m.visualEndLine
+				}
+			} else {
+				// Move cursor up
+				if m.jobLogCursor > 0 {
+					m.jobLogCursor--
+				}
+			}
+			// Keep cursor in view
+			if m.jobLogCursor < m.jobLogViewport.YOffset {
+				m.jobLogViewport.ScrollUp(1)
+			}
+		} else {
+			// Previous job in list
+			if m.selectedJobIdx > 0 {
+				m.selectedJobIdx--
+				if !m.isDemo {
+					m.jobLog = ""
+					m.jobLogReady = false
+					m.loading = true
+					m.loadingMsg = "Loading job log..."
+					m.statusMsg = ""
+					cmd := m.loadJobLog(m.jobs[m.selectedJobIdx].ID)
+					m.retryCmd = cmd
+					return m, cmd
+				}
+			}
 		}
-	case "h", "left":
-		m.jobLogViewport.ScrollUp(3)
-	case "l", "right":
-		m.jobLogViewport.ScrollDown(3)
 	case "ctrl+d":
-		m.jobLogViewport.HalfPageDown()
+		if m.jobLogFocused {
+			m.jobLogViewport.HalfPageDown()
+			if m.visualLineMode {
+				m.visualEndLine = m.jobLogViewport.YOffset
+			}
+		}
 	case "ctrl+u":
-		m.jobLogViewport.HalfPageUp()
+		if m.jobLogFocused {
+			m.jobLogViewport.HalfPageUp()
+			if m.visualLineMode {
+				m.visualEndLine = m.jobLogViewport.YOffset
+			}
+		}
 	case "g":
-		m.jobLogViewport.GotoTop()
+		if m.jobLogFocused {
+			m.jobLogViewport.GotoTop()
+			m.jobLogCursor = 0
+			if m.visualLineMode {
+				m.visualEndLine = 0
+			}
+		}
 	case "G":
-		m.jobLogViewport.GotoBottom()
+		if m.jobLogFocused {
+			m.jobLogViewport.GotoBottom()
+			m.jobLogCursor = m.jobLogViewport.TotalLineCount() - 1
+			if m.visualLineMode {
+				m.visualEndLine = m.jobLogCursor
+			}
+		}
 	case "y":
-		// Copy job log to clipboard
-		if m.jobLog != "" {
-			cleanLog := stripANSI(m.jobLog)
+		if m.visualLineMode {
+			// Copy selected lines
+			lines := strings.Split(m.jobLog, "\n")
+			start := m.visualStartLine
+			end := m.visualEndLine
+			if start > end {
+				start, end = end, start
+			}
+			if end >= len(lines) {
+				end = len(lines) - 1
+			}
+			if start < 0 {
+				start = 0
+			}
+			selected := strings.Join(lines[start:end+1], "\n")
+			cleanLog := stripANSI(selected)
 			if err := copyToClipboard(cleanLog); err != nil {
 				m.statusMsg = "Copy failed: " + err.Error()
 			} else {
-				m.statusMsg = "Copied to clipboard!"
+				m.statusMsg = fmt.Sprintf("Copied %d lines!", end-start+1)
+			}
+			m.visualLineMode = false
+		} else {
+			// Copy entire job log
+			if m.jobLog != "" {
+				cleanLog := stripANSI(m.jobLog)
+				if err := copyToClipboard(cleanLog); err != nil {
+					m.statusMsg = "Copy failed: " + err.Error()
+				} else {
+					m.statusMsg = "Copied to clipboard!"
+				}
 			}
 		}
 	}
@@ -1582,21 +1779,14 @@ func (m *MainScreen) View() string {
 	// Calculate dimensions using config ratios
 	contentHeight := m.height - config.StatusBarHeight
 	navWidth := int(float64(m.width) * config.NavigatorWidthRatio)
-	rightWidth := m.width - navWidth
-
-	contentWidth := int(float64(rightWidth) * (config.ContentWidthRatio / (config.ContentWidthRatio + config.DetailWidthRatio)))
-	detailWidth := rightWidth - contentWidth
+	contentWidth := m.width - navWidth
 
 	// Render panels
 	navPanel := m.renderNavigatorPanel(navWidth, contentHeight)
 	contentPanel := m.renderContentPanel(contentWidth, contentHeight)
-	detailPanel := m.renderDetailPanel(detailWidth, contentHeight)
-
-	// Combine right side
-	rightSide := lipgloss.JoinHorizontal(lipgloss.Top, contentPanel, detailPanel)
 
 	// Combine all
-	main := lipgloss.JoinHorizontal(lipgloss.Top, navPanel, rightSide)
+	main := lipgloss.JoinHorizontal(lipgloss.Top, navPanel, contentPanel)
 	statusBar := m.renderStatusBar()
 
 	return main + "\n" + statusBar
@@ -1695,13 +1885,25 @@ func (m *MainScreen) renderContentPanel(width, height int) string {
 func (m *MainScreen) renderListSection(width, height int) string {
 	var content strings.Builder
 
-	// Project header with branch
+	// Project header with branch and last commit
 	if m.selectedProject != nil {
 		projectHeader := styles.SelectedItem.Render(m.selectedProject.Name)
 		if m.currentBranch != "" {
 			projectHeader += styles.DimmedText.Render(" (" + m.currentBranch + ")")
 		}
 		content.WriteString(projectHeader + "\n")
+
+		// Show last commit from current branch
+		for _, b := range m.branches {
+			if b.Name == m.currentBranch && b.Commit.Title != "" {
+				commitInfo := styles.DimmedText.Render("Last commit: ") + truncateString(b.Commit.Title, width-20)
+				if b.Commit.AuthorName != "" {
+					commitInfo += styles.DimmedText.Render(" by " + b.Commit.AuthorName)
+				}
+				content.WriteString(commitInfo + "\n")
+				break
+			}
+		}
 	}
 
 	// Tab header
@@ -1768,17 +1970,36 @@ func (m *MainScreen) renderListSection(width, height int) string {
 					if f.Type == "tree" {
 						icon = "📁"
 					}
+					// Build commit info
+					commitInfo := ""
+					if f.LastCommit != nil {
+						commitInfo = fmt.Sprintf(" %s @%s", timeAgo(f.LastCommit.AuthoredDate), f.LastCommit.AuthorName)
+					}
 					line := fmt.Sprintf("%s %s", icon, f.Name)
+					meta := styles.DimmedText.Render(commitInfo)
 					if i == m.selectedContent {
-						line = styles.SelectedItem.Render("> " + line)
+						line = styles.SelectedItem.Render("> "+line) + meta
 					} else {
-						line = "  " + line
+						line = "  " + line + meta
 					}
 					content.WriteString(line + "\n")
 				}
 				// Show scroll indicator
 				if len(m.files) > visibleLines {
 					content.WriteString(styles.DimmedText.Render(fmt.Sprintf("\n[%d/%d]", m.selectedContent+1, len(m.files))))
+				}
+				// Show selected file info
+				if m.selectedContent < len(m.files) {
+					f := m.files[m.selectedContent]
+					fileType := "File"
+					if f.Type == "tree" {
+						fileType = "Directory"
+					}
+					infoLine := fileType + ": " + f.Path
+					if f.LastCommit != nil && f.LastCommit.Title != "" {
+						infoLine += " | " + truncateString(f.LastCommit.Title, width-len(infoLine)-10)
+					}
+					content.WriteString("\n" + styles.DimmedText.Render(infoLine))
 				}
 			}
 		case TabMRs:
@@ -1792,18 +2013,38 @@ func (m *MainScreen) renderListSection(width, height int) string {
 				if mr.Draft {
 					icon = "◐"
 				}
-				line := fmt.Sprintf("%s !%d %s", icon, mr.IID, mr.Title)
+				// Build reviewer string
+				reviewerStr := ""
+				if len(mr.Reviewers) > 0 {
+					reviewerStr = " → " + mr.Reviewers[0].Username
+					if len(mr.Reviewers) > 1 {
+						reviewerStr += fmt.Sprintf(" +%d", len(mr.Reviewers)-1)
+					}
+				}
+				line := fmt.Sprintf("%s !%d %s", icon, mr.IID, truncateString(mr.Title, width-45))
+				meta := styles.DimmedText.Render(fmt.Sprintf(" @%s%s %s", mr.Author.Username, reviewerStr, timeAgo(mr.CreatedAt)))
 				if i == m.selectedContent {
-					line = styles.SelectedItem.Render("> ") + line
+					line = styles.SelectedItem.Render("> ") + line + meta
 				} else {
-					line = "  " + line
+					line = "  " + line + meta
 				}
 				content.WriteString(line + "\n")
 			}
 			if len(m.mergeRequests) == 0 {
 				content.WriteString(styles.DimmedText.Render("No open merge requests"))
-			} else if len(m.mergeRequests) > visibleLines {
-				content.WriteString(styles.DimmedText.Render(fmt.Sprintf("\n[%d/%d]", m.selectedContent+1, len(m.mergeRequests))))
+			} else {
+				if len(m.mergeRequests) > visibleLines {
+					content.WriteString(styles.DimmedText.Render(fmt.Sprintf("\n[%d/%d]", m.selectedContent+1, len(m.mergeRequests))))
+				}
+				// Show selected MR info
+				if m.selectedContent < len(m.mergeRequests) {
+					mr := m.mergeRequests[m.selectedContent]
+					mrInfo := fmt.Sprintf("%s → %s", mr.SourceBranch, mr.TargetBranch)
+					if mr.HasConflicts {
+						mrInfo += " (conflicts)"
+					}
+					content.WriteString("\n" + styles.DimmedText.Render(mrInfo))
+				}
 			}
 		case TabPipelines:
 			endIdx := m.fileScrollOffset + visibleLines
@@ -1843,27 +2084,42 @@ func (m *MainScreen) renderListSection(width, height int) string {
 							}
 						}
 					}
-					// Build stage icons
+					// Build stage icons with names
 					for _, stage := range stageOrder {
 						status := stageStatus[stage]
 						stageIcon := styles.PipelineIcon(status)
 						stageStyle := styles.PipelineStatus(status)
-						stagesStr += stageStyle.Render(stageIcon) + " "
+						stagesStr += stageStyle.Render(stageIcon) + styles.DimmedText.Render("("+stage+")") + " "
 					}
 				}
 
+				// Build meta info: user, time, source
+				userStr := ""
+				if p.User.Username != "" {
+					userStr = "@" + p.User.Username
+				}
+				meta := styles.DimmedText.Render(fmt.Sprintf(" %s %s %s", userStr, p.Source, timeAgo(p.CreatedAt)))
+
 				line := fmt.Sprintf("%s #%d %s %s", statusStyle.Render(icon), p.IID, p.Ref, stagesStr)
 				if i == m.selectedContent {
-					line = styles.SelectedItem.Render("> ") + line
+					line = styles.SelectedItem.Render("> ") + line + meta
 				} else {
-					line = "  " + line
+					line = "  " + line + meta
 				}
 				content.WriteString(line + "\n")
 			}
 			if len(m.pipelines) == 0 {
 				content.WriteString(styles.DimmedText.Render("No pipelines"))
-			} else if len(m.pipelines) > visibleLines {
-				content.WriteString(styles.DimmedText.Render(fmt.Sprintf("\n[%d/%d]", m.selectedContent+1, len(m.pipelines))))
+			} else {
+				if len(m.pipelines) > visibleLines {
+					content.WriteString(styles.DimmedText.Render(fmt.Sprintf("\n[%d/%d]", m.selectedContent+1, len(m.pipelines))))
+				}
+				// Show selected pipeline info
+				if m.selectedContent < len(m.pipelines) {
+					p := m.pipelines[m.selectedContent]
+					pInfo := fmt.Sprintf("%s | %s", p.Status, p.SHA[:8])
+					content.WriteString("\n" + styles.DimmedText.Render(pInfo))
+				}
 			}
 		}
 	}
@@ -1933,12 +2189,13 @@ func (m *MainScreen) renderJobLogPopup() string {
 		jobList.WriteString("\n")
 	}
 
+	// Job panel - focused when not in log
 	jobPanel := components.SimpleBorderedPanel(
 		fmt.Sprintf("Jobs (%d)", len(m.jobs)),
 		jobList.String(),
 		jobListWidth,
 		popupHeight,
-		true,
+		!m.jobLogFocused,
 	)
 
 	// Render log panel
@@ -1963,15 +2220,35 @@ func (m *MainScreen) renderJobLogPopup() string {
 			cleanLog = strings.ReplaceAll(cleanLog, "\r", "")
 			wrappedLog := wrapText(cleanLog, logInnerWidth)
 			m.jobLogViewport.SetContent(wrappedLog)
+			// Start at bottom where errors usually are
+			m.jobLogViewport.GotoBottom()
 			m.jobLogReady = true
 		}
-		// Get viewport content and hard-truncate each line
+		// Get viewport content and apply visual selection highlighting
 		viewContent := m.jobLogViewport.View()
 		lines := strings.Split(viewContent, "\n")
 		for i, line := range lines {
 			// Also replace any remaining tabs
 			line = strings.ReplaceAll(line, "\t", "    ")
-			lines[i] = hardTruncate(line, logInnerWidth)
+			line = hardTruncate(line, logInnerWidth)
+
+			// Apply cursor or visual selection highlighting
+			viewportLine := m.jobLogViewport.YOffset + i
+			if m.visualLineMode {
+				start := m.visualStartLine
+				end := m.visualEndLine
+				if start > end {
+					start, end = end, start
+				}
+				if viewportLine >= start && viewportLine <= end {
+					// Highlight selected line with reverse video
+					line = lipgloss.NewStyle().Reverse(true).Render(line)
+				}
+			} else if m.jobLogFocused && viewportLine == m.jobLogCursor {
+				// Show cursor line
+				line = lipgloss.NewStyle().Reverse(true).Render(line)
+			}
+			lines[i] = line
 		}
 		logContent.WriteString(strings.Join(lines, "\n"))
 	}
@@ -1987,7 +2264,8 @@ func (m *MainScreen) renderJobLogPopup() string {
 		logTitle = fmt.Sprintf("%s - %s%s", job.Name, job.Status, duration)
 	}
 
-	logPanel := components.SimpleBorderedPanel(logTitle, logContent.String(), logWidth, popupHeight, false)
+	// Log panel - focused when in log
+	logPanel := components.SimpleBorderedPanel(logTitle, logContent.String(), logWidth, popupHeight, m.jobLogFocused)
 
 	// Join panels horizontally
 	combined := lipgloss.JoinHorizontal(lipgloss.Top, jobPanel, logPanel)
@@ -1998,11 +2276,11 @@ func (m *MainScreen) renderJobLogPopup() string {
 		scrollInfo = fmt.Sprintf(" [%d%%]", int(m.jobLogViewport.ScrollPercent()*100))
 	}
 
-	statusContent := styles.StatusBarKey.Render("Esc") + styles.StatusBarDesc.Render(" close") + " │ " +
-		styles.StatusBarKey.Render("j/k") + styles.StatusBarDesc.Render(" jobs") + " │ " +
-		styles.StatusBarKey.Render("C-d/C-u") + styles.StatusBarDesc.Render(" scroll") + " │ " +
-		styles.StatusBarKey.Render("g/G") + styles.StatusBarDesc.Render(" top/bottom") + " │ " +
-		styles.StatusBarKey.Render("y") + styles.StatusBarDesc.Render(" copy") +
+	statusContent := styles.StatusBarKey.Render("h/l") + styles.StatusBarDesc.Render(" panels") + " │ " +
+		styles.StatusBarKey.Render("j/k") + styles.StatusBarDesc.Render(" nav") + " │ " +
+		styles.StatusBarKey.Render("V") + styles.StatusBarDesc.Render(" select") + " │ " +
+		styles.StatusBarKey.Render("y") + styles.StatusBarDesc.Render(" copy") + " │ " +
+		styles.StatusBarKey.Render("Esc") + styles.StatusBarDesc.Render(" back") +
 		scrollInfo
 
 	if m.statusMsg != "" {
@@ -2012,58 +2290,6 @@ func (m *MainScreen) renderJobLogPopup() string {
 	statusBar := styles.StatusBar.Width(m.width).Render(statusContent)
 
 	return combined + "\n" + statusBar
-}
-
-func (m *MainScreen) renderDetailPanel(width, height int) string {
-	var content strings.Builder
-
-	if m.selectedProject != nil {
-		switch m.contentTab {
-		case TabFiles:
-			if m.viewingFile {
-				// Show file info when viewing
-				content.WriteString(styles.SelectedItem.Render(m.viewingFilePath) + "\n\n")
-				content.WriteString(styles.DimmedText.Render("Lines: ") + fmt.Sprintf("%d", strings.Count(m.fileContent, "\n")+1) + "\n")
-			} else if m.selectedContent < len(m.files) {
-				f := m.files[m.selectedContent]
-				content.WriteString(styles.SelectedItem.Render(f.Name) + "\n\n")
-				fileType := "File"
-				if f.Type == "tree" {
-					fileType = "Directory"
-				}
-				content.WriteString(styles.DimmedText.Render("Type: ") + fileType + "\n")
-				content.WriteString(styles.DimmedText.Render("Path: ") + f.Path + "\n")
-				if f.Type == "blob" {
-					content.WriteString("\n" + styles.DimmedText.Render("Press Enter to view"))
-				}
-			}
-		case TabMRs:
-			if m.selectedContent < len(m.mergeRequests) {
-				mr := m.mergeRequests[m.selectedContent]
-				content.WriteString(styles.SelectedItem.Render(mr.Title) + "\n\n")
-				content.WriteString(styles.DimmedText.Render("Author: ") + mr.Author.Name + "\n")
-				content.WriteString(styles.DimmedText.Render("Branch: ") + mr.SourceBranch + "\n")
-				content.WriteString(styles.DimmedText.Render("Target: ") + mr.TargetBranch + "\n")
-				content.WriteString(styles.DimmedText.Render("Status: ") + mr.MergeStatus + "\n")
-				if mr.Description != "" {
-					content.WriteString("\n" + mr.Description)
-				}
-			}
-		case TabPipelines:
-			if m.selectedContent < len(m.pipelines) {
-				p := m.pipelines[m.selectedContent]
-				statusStyle := styles.PipelineStatus(p.Status)
-				content.WriteString(fmt.Sprintf("#%d %s\n\n", p.IID, p.Ref))
-				content.WriteString(styles.DimmedText.Render("Status: ") + statusStyle.Render(p.Status) + "\n")
-				content.WriteString(styles.DimmedText.Render("SHA: ") + p.SHA[:8] + "\n")
-				content.WriteString(styles.DimmedText.Render("Source: ") + p.Source + "\n")
-			}
-		}
-	} else {
-		content.WriteString(styles.DimmedText.Render("Select a project"))
-	}
-
-	return components.SimpleBorderedPanel("Details", content.String(), width, height, m.focusedPanel == PanelDetail)
 }
 
 func (m *MainScreen) renderBranchPopup() string {
@@ -2192,7 +2418,6 @@ func (m *MainScreen) renderStatusBar() string {
 		{PanelNavigator, "1", "navigator"},
 		{PanelContent, "2", "content"},
 		{PanelReadme, "3", "readme"},
-		{PanelDetail, "4", "detail"},
 	}
 
 	var parts []string

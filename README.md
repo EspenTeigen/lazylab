@@ -140,14 +140,15 @@ You can safely use lazylab with your production GitLab instance without worrying
 
 - GitLab Personal Access Token with `read_api` scope
 - Terminal with true color support (recommended)
-- **Linux only:** `xclip` or `xsel` for clipboard support (optional)
+- **Linux clipboard support** (optional):
   ```bash
-  # Debian/Ubuntu
-  sudo apt install xclip
-  # Fedora
-  sudo dnf install xclip
-  # Arch
-  sudo pacman -S xclip
+  # Wayland (Sway, GNOME, etc.)
+  sudo pacman -S wl-clipboard  # Arch
+  sudo apt install wl-clipboard  # Debian/Ubuntu
+
+  # X11
+  sudo pacman -S xclip  # Arch
+  sudo apt install xclip  # Debian/Ubuntu
   ```
 
 ## Contributing

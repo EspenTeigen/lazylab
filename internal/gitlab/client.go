@@ -173,6 +173,23 @@ func (c *Client) GetTree(projectID, ref, treePath string) ([]TreeEntry, error) {
 	return entries, nil
 }
 
+// GetLastCommitForPath fetches the most recent commit for a specific file/directory path
+func (c *Client) GetLastCommitForPath(projectID, ref, filePath string) (*Commit, error) {
+	var commits []Commit
+	path := fmt.Sprintf("/projects/%s/repository/commits?ref_name=%s&path=%s&per_page=1",
+		url.PathEscape(projectID),
+		url.QueryEscape(ref),
+		url.QueryEscape(filePath))
+
+	if err := c.get(path, &commits); err != nil {
+		return nil, err
+	}
+	if len(commits) == 0 {
+		return nil, nil
+	}
+	return &commits[0], nil
+}
+
 // GetFileContent fetches raw file content
 func (c *Client) GetFileContent(projectID string, filePath string, ref string) (string, error) {
 	reqURL := fmt.Sprintf("%s/api/v4/projects/%s/repository/files/%s/raw?ref=%s",
