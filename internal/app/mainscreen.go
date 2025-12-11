@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
@@ -480,10 +481,11 @@ const (
 	TabFiles ContentTab = iota
 	TabMRs
 	TabPipelines
+	TabReleases
 	TabCount
 )
 
-var contentTabNames = []string{"Files", "MRs", "Pipelines"}
+var contentTabNames = []string{"Files", "MRs", "Pipelines", "Releases"}
 
 // MainScreen is the lazygit-style multi-panel interface
 type MainScreen struct {
@@ -501,6 +503,7 @@ type MainScreen struct {
 	files         []gitlab.TreeEntry
 	mergeRequests []gitlab.MergeRequest
 	pipelines     []gitlab.Pipeline
+	releases      []gitlab.Release
 	branches      []gitlab.Branch
 	jobs          []gitlab.Job
 	jobLog        string
@@ -594,6 +597,21 @@ type MainScreen struct {
 	runnersLastKey   string
 	runnersCursor    int
 	runnersTab       int // 0 = running, 1 = pending
+
+	// Release assets popup
+	showReleasePopup    bool
+	selectedReleaseIdx  int // Index of selected release for popup
+	releaseAssetCursor  int // Cursor position in assets list
+	releaseScrollOffset int // Scroll offset for assets list
+
+	// Folder browser for downloads
+	showFolderBrowser    bool
+	folderBrowserPath    string   // Current path in folder browser
+	folderBrowserEntries []string // Directory entries (folders only)
+	folderBrowserCursor  int      // Selected entry index
+	folderBrowserScroll  int      // Scroll offset
+	downloadURL          string   // URL to download after folder selection
+	downloadFilename     string   // Filename for the download
 
 	// Demo mode (no API calls)
 	isDemo bool
@@ -908,6 +926,20 @@ func (m *MainScreen) loadPipelines() tea.Cmd {
 	}
 }
 
+func (m *MainScreen) loadReleases() tea.Cmd {
+	if m.selectedProject == nil || m.isDemo {
+		return nil
+	}
+	projectID := fmt.Sprintf("%d", m.selectedProject.ID)
+	return func() tea.Msg {
+		releases, err := m.client.ListReleases(projectID)
+		if err != nil {
+			return errMsg{err: err}
+		}
+		return releasesLoadedMsg{releases: releases}
+	}
+}
+
 func (m *MainScreen) loadBranches() tea.Cmd {
 	if m.selectedProject == nil || m.isDemo {
 		return nil
@@ -987,6 +1019,12 @@ type fileContentMsg struct {
 }
 type mrsLoadedMsg struct{ mrs []gitlab.MergeRequest }
 type pipelinesLoadedMsg struct{ pipelines []gitlab.Pipeline }
+type releasesLoadedMsg struct{ releases []gitlab.Release }
+type downloadCompleteMsg struct {
+	filename string
+	bytes    int64
+	err      error
+}
 type branchesLoadedMsg struct{ branches []gitlab.Branch }
 type jobsLoadedMsg struct{ jobs []gitlab.Job }
 type jobLogLoadedMsg struct{ log string }
@@ -1226,6 +1264,23 @@ func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, pipelineTickCmd())
 		return m, tea.Batch(cmds...)
 
+	case releasesLoadedMsg:
+		m.releases = msg.releases
+		m.selectedContent = 0
+		m.fileScrollOffset = 0
+		m.loading = false
+		m.lastError = ""
+		return m, nil
+
+	case downloadCompleteMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.statusMsg = "Download failed: " + msg.err.Error()
+		} else {
+			m.statusMsg = fmt.Sprintf("Downloaded %s (%d bytes)", msg.filename, msg.bytes)
+		}
+		return m, nil
+
 	case pipelinesRefreshedMsg:
 		// Preserve selection when auto-refreshing
 		selectedPipelineID := 0
@@ -1406,6 +1461,12 @@ func (m *MainScreen) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	if m.showRunnersPopup {
 		return m.handleRunnersPopup(msg)
+	}
+	if m.showReleasePopup {
+		return m.handleReleasePopup(msg)
+	}
+	if m.showFolderBrowser {
+		return m.handleFolderBrowser(msg)
 	}
 
 	if key.Matches(msg, m.keymap.Quit) {
@@ -1593,6 +1654,7 @@ func (m *MainScreen) handleNavigatorNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.files = nil
 			m.mergeRequests = nil
 			m.pipelines = nil
+			m.releases = nil
 			m.branches = nil
 			m.fileContent = ""
 			m.readmeContent = ""
@@ -1657,7 +1719,7 @@ func (m *MainScreen) handleContentNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, m.keymap.Right):
 		// l - switch to next tab
-		if m.contentTab < TabPipelines {
+		if m.contentTab < TabReleases {
 			return m, m.switchTab(m.contentTab + 1)
 		}
 
@@ -1713,6 +1775,14 @@ func (m *MainScreen) handleContentNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.retryCmd = cmd
 			return m, cmd
 		}
+		// Show release assets popup
+		if m.contentTab == TabReleases && m.selectedContent < len(m.releases) {
+			m.selectedReleaseIdx = m.selectedContent
+			m.releaseAssetCursor = 0
+			m.releaseScrollOffset = 0
+			m.showReleasePopup = true
+			return m, nil
+		}
 
 	case key.Matches(msg, m.keymap.Down):
 		// If viewing file, scroll down
@@ -1763,8 +1833,11 @@ func (m *MainScreen) handleContentNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *MainScreen) adjustScrollOffset() {
-	// Calculate visible area (rough estimate, accounting for headers)
-	visibleLines := (m.height / 2) - 6 // half height minus headers/borders
+	// Calculate visible area matching renderContentPanel calculation
+	// contentHeight = m.height - StatusBarHeight (1)
+	// visibleLines = height - 6 (in renderContentPanel)
+	contentHeight := m.height - config.StatusBarHeight
+	visibleLines := contentHeight - 6
 	if visibleLines < 1 {
 		visibleLines = 1
 	}
@@ -2307,6 +2380,14 @@ func (m *MainScreen) switchTab(tab ContentTab) tea.Cmd {
 			m.retryCmd = cmd
 			return cmd
 		}
+	case TabReleases:
+		if len(m.releases) == 0 {
+			m.loading = true
+			m.loadingMsg = "Loading releases..."
+			cmd := m.loadReleases()
+			m.retryCmd = cmd
+			return cmd
+		}
 	}
 	return nil
 }
@@ -2319,6 +2400,8 @@ func (m *MainScreen) getContentCount() int {
 		return len(m.mergeRequests)
 	case TabPipelines:
 		return len(m.pipelines)
+	case TabReleases:
+		return len(m.releases)
 	}
 	return 0
 }
@@ -2342,6 +2425,12 @@ func (m *MainScreen) View() string {
 	}
 	if m.showRunnersPopup {
 		return m.renderRunnersPopup()
+	}
+	if m.showReleasePopup {
+		return m.renderReleasePopup()
+	}
+	if m.showFolderBrowser {
+		return m.renderFolderBrowser()
 	}
 
 	// Calculate dimensions using config ratios
@@ -2694,6 +2783,52 @@ func (m *MainScreen) renderListSection(width, height int) string {
 					}
 					pInfo := fmt.Sprintf("%s | %s", p.Status, sha)
 					content.WriteString("\n" + styles.DimmedText.Render(pInfo))
+				}
+			}
+		case TabReleases:
+			endIdx := m.fileScrollOffset + visibleLines
+			if endIdx > len(m.releases) {
+				endIdx = len(m.releases)
+			}
+			for i := m.fileScrollOffset; i < endIdx; i++ {
+				rel := m.releases[i]
+				// Count downloadable assets (links + source archives)
+				assetCount := len(rel.Assets.Links) + len(rel.Assets.Sources)
+				assetStr := ""
+				if assetCount > 0 {
+					assetStr = fmt.Sprintf(" [%d]", assetCount)
+				}
+
+				// Format release time
+				relTime := timeAgo(rel.CreatedAt)
+				if rel.ReleasedAt != nil {
+					relTime = timeAgo(*rel.ReleasedAt)
+				}
+
+				line := fmt.Sprintf("📦 %s%s", rel.TagName, assetStr)
+				meta := styles.DimmedText.Render(fmt.Sprintf(" @%s %s", rel.Author.Username, relTime))
+				if i == m.selectedContent {
+					line = styles.SelectedItem.Render("> ") + line + meta
+				} else {
+					line = "  " + line + meta
+				}
+				content.WriteString(line + "\n")
+			}
+			if len(m.releases) == 0 {
+				content.WriteString(styles.DimmedText.Render("No releases"))
+			} else {
+				if len(m.releases) > visibleLines {
+					content.WriteString(styles.DimmedText.Render(fmt.Sprintf("\n[%d/%d]", m.selectedContent+1, len(m.releases))))
+				}
+				// Show selected release info
+				if m.selectedContent < len(m.releases) {
+					rel := m.releases[m.selectedContent]
+					name := rel.Name
+					if name == "" {
+						name = rel.TagName
+					}
+					relInfo := fmt.Sprintf("%s | commit: %s", name, rel.Commit.ShortID)
+					content.WriteString("\n" + styles.DimmedText.Render(relInfo))
 				}
 			}
 		}
@@ -3261,4 +3396,502 @@ func (m *MainScreen) renderStatusBar() string {
 	}
 
 	return styles.StatusBar.Width(m.width).Render(left + strings.Repeat(" ", padding) + help)
+}
+
+// handleReleasePopup handles keyboard input for the release assets popup
+func (m *MainScreen) handleReleasePopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.selectedReleaseIdx >= len(m.releases) {
+		m.showReleasePopup = false
+		return m, nil
+	}
+
+	rel := m.releases[m.selectedReleaseIdx]
+	totalAssets := len(rel.Assets.Sources) + len(rel.Assets.Links)
+
+	switch msg.String() {
+	case "esc", "escape", "q":
+		m.showReleasePopup = false
+		return m, nil
+	case "j", "down":
+		if m.releaseAssetCursor < totalAssets-1 {
+			m.releaseAssetCursor++
+		}
+	case "k", "up":
+		if m.releaseAssetCursor > 0 {
+			m.releaseAssetCursor--
+		}
+	case "g":
+		m.releaseAssetCursor = 0
+	case "G":
+		if totalAssets > 0 {
+			m.releaseAssetCursor = totalAssets - 1
+		}
+	case "y", "enter":
+		// Copy the URL of selected asset to clipboard
+		url := m.getSelectedReleaseAssetURL()
+		if url != "" {
+			if err := copyToClipboard(url); err != nil {
+				m.statusMsg = "Copy failed: " + err.Error()
+			} else {
+				m.statusMsg = "Copied: " + truncateString(url, 60)
+			}
+		}
+		return m, nil
+	case "o":
+		// Open release web URL in browser
+		if rel.Links.Self != "" {
+			m.statusMsg = "Open: " + rel.Links.Self
+			// Just copy for now - could open browser in future
+			if err := copyToClipboard(rel.Links.Self); err != nil {
+				m.statusMsg = "Copy failed: " + err.Error()
+			} else {
+				m.statusMsg = "Copied release URL: " + truncateString(rel.Links.Self, 50)
+			}
+		}
+		return m, nil
+	case "d":
+		// Download the selected asset - open folder browser
+		url := m.getSelectedReleaseAssetURL()
+		filename := m.getSelectedReleaseAssetFilename()
+		if url != "" && filename != "" {
+			m.downloadURL = url
+			m.downloadFilename = filename
+			m.showReleasePopup = false
+			m.openFolderBrowser()
+		}
+		return m, nil
+	}
+
+	return m, nil
+}
+
+// getSelectedReleaseAssetFilename returns the filename of the currently selected asset
+func (m *MainScreen) getSelectedReleaseAssetFilename() string {
+	if m.selectedReleaseIdx >= len(m.releases) {
+		return ""
+	}
+
+	rel := m.releases[m.selectedReleaseIdx]
+	cursor := m.releaseAssetCursor
+
+	// First, source archives
+	if cursor < len(rel.Assets.Sources) {
+		src := rel.Assets.Sources[cursor]
+		return fmt.Sprintf("%s-%s.%s", rel.TagName, "source", src.Format)
+	}
+
+	// Then, asset links
+	linkIdx := cursor - len(rel.Assets.Sources)
+	if linkIdx < len(rel.Assets.Links) {
+		return rel.Assets.Links[linkIdx].Name
+	}
+
+	return ""
+}
+
+// openFolderBrowser initializes and shows the folder browser
+func (m *MainScreen) openFolderBrowser() {
+	// Start from home directory
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "/"
+	}
+	m.folderBrowserPath = home
+	m.folderBrowserCursor = 0
+	m.folderBrowserScroll = 0
+	m.loadFolderEntries()
+	m.showFolderBrowser = true
+}
+
+// loadFolderEntries loads directory entries for the current folder browser path
+func (m *MainScreen) loadFolderEntries() {
+	entries, err := os.ReadDir(m.folderBrowserPath)
+	if err != nil {
+		m.folderBrowserEntries = []string{}
+		return
+	}
+
+	m.folderBrowserEntries = []string{}
+	for _, entry := range entries {
+		name := entry.Name()
+		// Skip hidden files/directories (starting with .)
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+		if entry.IsDir() {
+			m.folderBrowserEntries = append(m.folderBrowserEntries, name)
+		}
+	}
+	sort.Strings(m.folderBrowserEntries)
+}
+
+// getSelectedReleaseAssetURL returns the URL of the currently selected asset
+func (m *MainScreen) getSelectedReleaseAssetURL() string {
+	if m.selectedReleaseIdx >= len(m.releases) {
+		return ""
+	}
+
+	rel := m.releases[m.selectedReleaseIdx]
+	cursor := m.releaseAssetCursor
+
+	// First, source archives
+	if cursor < len(rel.Assets.Sources) {
+		return rel.Assets.Sources[cursor].URL
+	}
+
+	// Then, asset links
+	linkIdx := cursor - len(rel.Assets.Sources)
+	if linkIdx < len(rel.Assets.Links) {
+		return rel.Assets.Links[linkIdx].URL
+	}
+
+	return ""
+}
+
+// renderReleasePopup renders the release assets popup
+func (m *MainScreen) renderReleasePopup() string {
+	if m.selectedReleaseIdx >= len(m.releases) {
+		return ""
+	}
+
+	rel := m.releases[m.selectedReleaseIdx]
+
+	// Popup dimensions
+	popupWidth := min(m.width-4, 80)
+	popupHeight := min(m.height-4, 30)
+
+	var content strings.Builder
+
+	// Release info header
+	name := rel.Name
+	if name == "" {
+		name = rel.TagName
+	}
+	content.WriteString(styles.ActivePanelTitle.Render("Release: "+name) + "\n")
+	content.WriteString(styles.DimmedText.Render("Tag: "+rel.TagName) + "\n")
+	if rel.Commit.ShortID != "" {
+		content.WriteString(styles.DimmedText.Render("Commit: "+rel.Commit.ShortID) + "\n")
+	}
+	content.WriteString("\n")
+
+	// Downloadable assets
+	content.WriteString(styles.ActivePanelTitle.Render("Downloads:") + "\n")
+
+	visibleLines := popupHeight - 10
+	cursor := 0
+
+	// Source archives first
+	for i, src := range rel.Assets.Sources {
+		icon := "📦"
+		line := fmt.Sprintf("%s Source code (%s)", icon, src.Format)
+
+		if cursor == m.releaseAssetCursor {
+			content.WriteString(styles.SelectedItem.Render("> ") + line + "\n")
+		} else {
+			content.WriteString("  " + line + "\n")
+		}
+		cursor++
+
+		if i >= visibleLines {
+			break
+		}
+	}
+
+	// Asset links
+	for i, link := range rel.Assets.Links {
+		icon := "📎"
+		switch link.LinkType {
+		case "package":
+			icon = "📦"
+		case "image":
+			icon = "🖼️"
+		case "runbook":
+			icon = "📖"
+		}
+
+		line := fmt.Sprintf("%s %s", icon, link.Name)
+		if len(line) > popupWidth-6 {
+			line = line[:popupWidth-7] + "…"
+		}
+
+		if cursor == m.releaseAssetCursor {
+			content.WriteString(styles.SelectedItem.Render("> ") + line + "\n")
+		} else {
+			content.WriteString("  " + line + "\n")
+		}
+		cursor++
+
+		if i+len(rel.Assets.Sources) >= visibleLines {
+			break
+		}
+	}
+
+	totalAssets := len(rel.Assets.Sources) + len(rel.Assets.Links)
+	if totalAssets == 0 {
+		content.WriteString(styles.DimmedText.Render("  No downloadable assets") + "\n")
+	} else {
+		content.WriteString(styles.DimmedText.Render(fmt.Sprintf("\n[%d/%d]", m.releaseAssetCursor+1, totalAssets)) + "\n")
+	}
+
+	// Show selected URL
+	selectedURL := m.getSelectedReleaseAssetURL()
+	if selectedURL != "" {
+		content.WriteString("\n" + styles.DimmedText.Render("URL: "+truncateString(selectedURL, popupWidth-8)) + "\n")
+	}
+
+	// Build popup panel
+	popup := components.SimpleBorderedPanel(
+		fmt.Sprintf("Release: %s", rel.TagName),
+		content.String(),
+		popupWidth,
+		popupHeight,
+		true,
+	)
+
+	// Center the popup
+	popupLines := strings.Split(popup, "\n")
+	topPadding := (m.height - len(popupLines)) / 2
+	leftPadding := (m.width - popupWidth) / 2
+	if topPadding < 0 {
+		topPadding = 0
+	}
+	if leftPadding < 0 {
+		leftPadding = 0
+	}
+
+	var result strings.Builder
+	for i := 0; i < topPadding; i++ {
+		result.WriteString("\n")
+	}
+	for _, line := range popupLines {
+		result.WriteString(strings.Repeat(" ", leftPadding) + line + "\n")
+	}
+
+	// Status bar at bottom
+	statusContent := styles.StatusBarKey.Render("Esc") + styles.StatusBarDesc.Render(" close") + " │ " +
+		styles.StatusBarKey.Render("j/k") + styles.StatusBarDesc.Render(" navigate") + " │ " +
+		styles.StatusBarKey.Render("y/Enter") + styles.StatusBarDesc.Render(" copy URL") + " │ " +
+		styles.StatusBarKey.Render("d") + styles.StatusBarDesc.Render(" download") + " │ " +
+		styles.StatusBarKey.Render("o") + styles.StatusBarDesc.Render(" copy release URL")
+
+	// Pad to bottom
+	currentLines := topPadding + len(popupLines)
+	for i := currentLines; i < m.height-1; i++ {
+		result.WriteString("\n")
+	}
+
+	result.WriteString(styles.StatusBar.Width(m.width).Render(statusContent))
+
+	return result.String()
+}
+
+// handleFolderBrowser handles keyboard input for the folder browser popup
+func (m *MainScreen) handleFolderBrowser(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "escape", "q":
+		m.showFolderBrowser = false
+		m.downloadURL = ""
+		m.downloadFilename = ""
+		return m, nil
+
+	case "j", "down":
+		if m.folderBrowserCursor < len(m.folderBrowserEntries)-1 {
+			m.folderBrowserCursor++
+			// Adjust scroll - match the visibleLines calculation in renderFolderBrowser
+			popupHeight := min(m.height-4, 25)
+			visibleLines := popupHeight - 12
+			if visibleLines < 3 {
+				visibleLines = 3
+			}
+			if m.folderBrowserCursor >= m.folderBrowserScroll+visibleLines {
+				m.folderBrowserScroll = m.folderBrowserCursor - visibleLines + 1
+			}
+		}
+
+	case "k", "up":
+		if m.folderBrowserCursor > 0 {
+			m.folderBrowserCursor--
+			if m.folderBrowserCursor < m.folderBrowserScroll {
+				m.folderBrowserScroll = m.folderBrowserCursor
+			}
+		}
+
+	case "g":
+		m.folderBrowserCursor = 0
+		m.folderBrowserScroll = 0
+
+	case "G":
+		if len(m.folderBrowserEntries) > 0 {
+			m.folderBrowserCursor = len(m.folderBrowserEntries) - 1
+			popupHeight := min(m.height-4, 25)
+			visibleLines := popupHeight - 12
+			if visibleLines < 3 {
+				visibleLines = 3
+			}
+			if m.folderBrowserCursor >= visibleLines {
+				m.folderBrowserScroll = m.folderBrowserCursor - visibleLines + 1
+			}
+		}
+
+	case "l", "enter":
+		// Enter selected directory
+		if m.folderBrowserCursor < len(m.folderBrowserEntries) {
+			selectedDir := m.folderBrowserEntries[m.folderBrowserCursor]
+			newPath := filepath.Join(m.folderBrowserPath, selectedDir)
+			// Verify it's accessible
+			if _, err := os.ReadDir(newPath); err == nil {
+				m.folderBrowserPath = newPath
+				m.folderBrowserCursor = 0
+				m.folderBrowserScroll = 0
+				m.loadFolderEntries()
+			}
+		}
+
+	case "h", "backspace":
+		// Go up one directory
+		parent := filepath.Dir(m.folderBrowserPath)
+		if parent != m.folderBrowserPath {
+			m.folderBrowserPath = parent
+			m.folderBrowserCursor = 0
+			m.folderBrowserScroll = 0
+			m.loadFolderEntries()
+		}
+
+	case "~":
+		// Go to home directory
+		if home, err := os.UserHomeDir(); err == nil {
+			m.folderBrowserPath = home
+			m.folderBrowserCursor = 0
+			m.folderBrowserScroll = 0
+			m.loadFolderEntries()
+		}
+
+	case "d", " ":
+		// Download to current directory
+		if m.downloadURL != "" && m.downloadFilename != "" {
+			destPath := filepath.Join(m.folderBrowserPath, m.downloadFilename)
+			m.showFolderBrowser = false
+			m.loading = true
+			m.loadingMsg = "Downloading " + m.downloadFilename + "..."
+
+			// Start download in background
+			url := m.downloadURL
+			filename := m.downloadFilename
+			client := m.client
+
+			return m, func() tea.Msg {
+				bytes, err := client.DownloadFile(url, destPath)
+				return downloadCompleteMsg{
+					filename: filename,
+					bytes:    bytes,
+					err:      err,
+				}
+			}
+		}
+	}
+
+	return m, nil
+}
+
+// renderFolderBrowser renders the folder browser popup
+func (m *MainScreen) renderFolderBrowser() string {
+	popupWidth := min(m.width-4, 70)
+	popupHeight := min(m.height-4, 25)
+
+	var content strings.Builder
+
+	// Current path
+	content.WriteString(styles.ActivePanelTitle.Render("Location:") + "\n")
+	displayPath := m.folderBrowserPath
+	if len(displayPath) > popupWidth-6 {
+		displayPath = "..." + displayPath[len(displayPath)-popupWidth+9:]
+	}
+	content.WriteString(styles.DimmedText.Render(displayPath) + "\n\n")
+
+	// File to download
+	content.WriteString(styles.ActivePanelTitle.Render("File:") + " " + m.downloadFilename + "\n\n")
+
+	// Directory listing
+	content.WriteString(styles.ActivePanelTitle.Render("Folders:") + "\n")
+
+	visibleLines := popupHeight - 12
+	if visibleLines < 3 {
+		visibleLines = 3
+	}
+
+	endIdx := m.folderBrowserScroll + visibleLines
+	if endIdx > len(m.folderBrowserEntries) {
+		endIdx = len(m.folderBrowserEntries)
+	}
+
+	if len(m.folderBrowserEntries) == 0 {
+		content.WriteString(styles.DimmedText.Render("  (empty directory)") + "\n")
+	} else {
+		for i := m.folderBrowserScroll; i < endIdx; i++ {
+			entry := m.folderBrowserEntries[i]
+			icon := "📁"
+
+			line := fmt.Sprintf("%s %s", icon, entry)
+			if len(line) > popupWidth-6 {
+				line = line[:popupWidth-7] + "…"
+			}
+
+			if i == m.folderBrowserCursor {
+				content.WriteString(styles.SelectedItem.Render("> ") + line + "\n")
+			} else {
+				content.WriteString("  " + line + "\n")
+			}
+		}
+	}
+
+	// Scroll indicator
+	if len(m.folderBrowserEntries) > visibleLines {
+		content.WriteString(styles.DimmedText.Render(fmt.Sprintf("\n[%d/%d]", m.folderBrowserCursor+1, len(m.folderBrowserEntries))) + "\n")
+	}
+
+	// Build popup panel
+	popup := components.SimpleBorderedPanel(
+		"Select Download Location",
+		content.String(),
+		popupWidth,
+		popupHeight,
+		true,
+	)
+
+	// Center the popup
+	popupLines := strings.Split(popup, "\n")
+	topPadding := (m.height - len(popupLines)) / 2
+	leftPadding := (m.width - popupWidth) / 2
+	if topPadding < 0 {
+		topPadding = 0
+	}
+	if leftPadding < 0 {
+		leftPadding = 0
+	}
+
+	var result strings.Builder
+	for i := 0; i < topPadding; i++ {
+		result.WriteString("\n")
+	}
+	for _, line := range popupLines {
+		result.WriteString(strings.Repeat(" ", leftPadding) + line + "\n")
+	}
+
+	// Status bar at bottom
+	folderStatusContent := styles.StatusBarKey.Render("Esc") + styles.StatusBarDesc.Render(" cancel") + " │ " +
+		styles.StatusBarKey.Render("j/k") + styles.StatusBarDesc.Render(" navigate") + " │ " +
+		styles.StatusBarKey.Render("l/Enter") + styles.StatusBarDesc.Render(" open") + " │ " +
+		styles.StatusBarKey.Render("h/Bksp") + styles.StatusBarDesc.Render(" up") + " │ " +
+		styles.StatusBarKey.Render("~") + styles.StatusBarDesc.Render(" home") + " │ " +
+		styles.StatusBarKey.Render("d/Space") + styles.StatusBarDesc.Render(" download here")
+
+	// Pad to bottom
+	folderCurrentLines := topPadding + len(popupLines)
+	for i := folderCurrentLines; i < m.height-1; i++ {
+		result.WriteString("\n")
+	}
+
+	result.WriteString(styles.StatusBar.Width(m.width).Render(folderStatusContent))
+
+	return result.String()
 }

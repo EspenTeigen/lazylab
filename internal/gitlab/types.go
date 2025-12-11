@@ -149,6 +149,49 @@ type Runner struct {
 	Status      string `json:"status"`
 }
 
+// ReleaseAssetLink represents a link to a release asset (binary, package, etc.)
+type ReleaseAssetLink struct {
+	ID       int    `json:"id"`
+	Name     string `json:"name"`
+	URL      string `json:"url"`
+	LinkType string `json:"link_type"` // "other", "runbook", "image", "package"
+}
+
+// ReleaseAssetSource represents a source code archive for a release
+type ReleaseAssetSource struct {
+	Format string `json:"format"` // "zip", "tar.gz", "tar.bz2", "tar"
+	URL    string `json:"url"`
+}
+
+// ReleaseAssets contains all assets for a release
+type ReleaseAssets struct {
+	Count   int                  `json:"count"`
+	Sources []ReleaseAssetSource `json:"sources"`
+	Links   []ReleaseAssetLink   `json:"links"`
+}
+
+// Release represents a GitLab project release
+type Release struct {
+	Name        string         `json:"name"`
+	TagName     string         `json:"tag_name"`
+	Description string         `json:"description"`
+	CreatedAt   time.Time      `json:"created_at"`
+	ReleasedAt  *time.Time     `json:"released_at"`
+	Author      User           `json:"author"`
+	Commit      Commit         `json:"commit"`
+	Assets      ReleaseAssets  `json:"assets"`
+	Evidences   []interface{}  `json:"evidences"`
+	Links       struct {
+		ClosedIssuesURL     string `json:"closed_issues_url"`
+		ClosedMergeReqURL   string `json:"closed_merge_requests_url"`
+		EditURL             string `json:"edit_url"`
+		MergedMergeReqURL   string `json:"merged_merge_requests_url"`
+		OpenedIssuesURL     string `json:"opened_issues_url"`
+		OpenedMergeReqURL   string `json:"opened_merge_requests_url"`
+		Self                string `json:"self"`
+	} `json:"_links"`
+}
+
 // Job represents a CI/CD job within a pipeline
 type Job struct {
 	ID         int        `json:"id"`

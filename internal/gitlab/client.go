@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -390,6 +391,56 @@ func (c *Client) ListPendingJobs() ([]Job, error) {
 		allJobs = append(allJobs, jobs...)
 	}
 	return allJobs, nil
+}
+
+// ListReleases fetches releases for a project
+func (c *Client) ListReleases(projectID string) ([]Release, error) {
+	var releases []Release
+	path := fmt.Sprintf("/projects/%s/releases?per_page=%d", url.PathEscape(projectID), c.perPage)
+	if err := c.get(path, &releases); err != nil {
+		return nil, err
+	}
+	return releases, nil
+}
+
+// DownloadFile downloads a file from the given URL and saves it to the specified path.
+// It uses the client's token for authentication if available.
+// Returns the number of bytes written and any error encountered.
+func (c *Client) DownloadFile(downloadURL, destPath string) (int64, error) {
+	req, err := http.NewRequest("GET", downloadURL, nil)
+	if err != nil {
+		return 0, fmt.Errorf("creating request: %w", err)
+	}
+
+	if c.token != "" {
+		req.Header.Set("PRIVATE-TOKEN", c.token)
+	}
+
+	resp, err := c.doWithRetry(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("download error %d: %s", resp.StatusCode, string(body))
+	}
+
+	// Create the destination file
+	out, err := os.Create(destPath)
+	if err != nil {
+		return 0, fmt.Errorf("creating file: %w", err)
+	}
+	defer out.Close()
+
+	// Copy the response body to the file
+	written, err := io.Copy(out, resp.Body)
+	if err != nil {
+		return written, fmt.Errorf("writing file: %w", err)
+	}
+
+	return written, nil
 }
 
 // GetJobLog fetches the log/trace for a specific job
