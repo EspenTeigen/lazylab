@@ -9,13 +9,21 @@ Browse GitLab projects, merge requests, pipelines, and streaming job logs from y
 ## Features
 
 - Browse groups and projects in a tree view
-- View repository files
-- View merge requests and pipelines
-- **Live-streaming pipeline job logs** with auto-refresh
+- View repository files with syntax highlighting
+- View merge requests with status indicators (open, merged, closed, draft)
+- View pipelines with stage status aggregation
+- **Live-streaming pipeline job logs** with auto-refresh and horizontal scrolling
+- **Global running/pending jobs popup** across all projects
 - Auto-refreshing pipeline status
+- **Browse releases** and download assets
 - Switch branches
-- Rendered README preview (markdown)
+- Rendered README preview (markdown via Glamour)
+- **Vim-style visual line selection** — select and yank lines from files, README, and logs
+- **Copy clone URLs** (SSH and HTTPS) to clipboard
+- Panel-based layout with focus indicators
+- Cross-platform clipboard support (macOS, Linux Wayland/X11, Windows)
 - Works with GitLab.com and self-hosted instances
+- Demo mode (`--demo`) for testing without API access
 
 ## Installation
 
@@ -101,6 +109,8 @@ If you use [glab](https://gitlab.com/gitlab-org/cli), lazylab will automatically
 
 ## Keybindings
 
+### General
+
 | Key | Action |
 |-----|--------|
 | `j/k` | Navigate up/down |
@@ -109,10 +119,34 @@ If you use [glab](https://gitlab.com/gitlab-org/cli), lazylab will automatically
 | `Esc` | Go back / close popup |
 | `g/G` | Go to top/bottom |
 | `C-d/C-u` | Page down/up |
-| `b` | Switch branch (in files view) |
 | `o` | Open in browser |
 | `r` | Refresh / retry on error |
+| `R` | Show all running/pending jobs |
+| `S` | Copy SSH clone URL |
+| `U` | Copy HTTPS clone URL |
 | `q` | Quit |
+
+### Panel focus
+
+| Key | Action |
+|-----|--------|
+| `H` / `Shift+Left` / `1` | Focus navigator panel |
+| `L` / `Shift+Right` / `2` | Focus content panel |
+| `K` / `Shift+Up` / `3` | Focus README panel |
+
+### Visual mode (files, README, logs)
+
+| Key | Action |
+|-----|--------|
+| `V` | Toggle visual line selection |
+| `yy` | Yank current line |
+| `ggy` | Yank all content |
+
+### Files tab
+
+| Key | Action |
+|-----|--------|
+| `b` | Switch branch |
 
 ### Pipeline job log popup
 
@@ -121,8 +155,19 @@ If you use [glab](https://gitlab.com/gitlab-org/cli), lazylab will automatically
 | `j/k` | Switch between jobs |
 | `C-d/C-u` | Scroll log |
 | `g/G` | Go to top/bottom of log |
+| `0/$` | Scroll to start/end of line |
 | `y` | Copy log to clipboard |
+| `V` | Visual line selection |
 | `Esc` | Close |
+
+### Releases tab
+
+| Key | Action |
+|-----|--------|
+| `y` / `Enter` | Copy asset URL |
+| `o` | Copy release URL |
+| `d` | Download asset |
+| `~` | Jump to home directory (in folder browser) |
 
 ## Security
 
