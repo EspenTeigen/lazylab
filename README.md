@@ -1,8 +1,6 @@
-# lazylab
+# LazyLab — A Terminal UI for GitLab
 
-A terminal UI for GitLab, inspired by [lazygit](https://github.com/jesseduffield/lazygit).
-
-> **Note:** This is a vibe-coded project. I haven't written a single line of code myself - it's entirely AI-generated using [Claude Code](https://claude.ai/claude-code). I built this because I wanted it, not as a showcase of coding skills. If the code style isn't perfect, I don't care - it works for my use case.
+Browse GitLab projects, merge requests, pipelines, and streaming job logs from your terminal. A fast, keyboard-driven TUI client for GitLab and self-hosted GitLab instances, inspired by [lazygit](https://github.com/jesseduffield/lazygit).
 
 [![Go Report Card](https://goreportcard.com/badge/github.com/EspenTeigen/lazylab)](https://goreportcard.com/report/github.com/EspenTeigen/lazylab)
 [![Release](https://img.shields.io/github/v/release/EspenTeigen/lazylab)](https://github.com/EspenTeigen/lazylab/releases)
