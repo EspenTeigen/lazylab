@@ -558,6 +558,13 @@ type MainScreen struct {
 	readmeVisualStart  int
 	readmeVisualEnd    int
 
+	// File view visual mode
+	fileCursor      int
+	fileLastKey     string
+	fileVisualMode  bool
+	fileVisualStart int
+	fileVisualEnd   int
+
 	// Job selection for pipelines
 	selectedJobIdx int
 
@@ -1236,6 +1243,9 @@ func (m *MainScreen) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewingFile = true
 		m.viewingFilePath = msg.path
 		m.fileViewReady = false // Reset to reinitialize viewport with new content
+		m.fileCursor = 0
+		m.fileLastKey = ""
+		m.fileVisualMode = false
 		m.loading = false
 		m.lastError = ""
 		return m, nil
@@ -1682,11 +1692,17 @@ func (m *MainScreen) handleNavigatorNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *MainScreen) handleContentNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Handle escape for going back
 	if msg.String() == "esc" || msg.String() == "escape" {
-		// If viewing a file, go back to file list
+		// If viewing a file, cancel visual mode first, then go back
 		if m.viewingFile {
+			if m.fileVisualMode {
+				m.fileVisualMode = false
+				return m, nil
+			}
 			m.viewingFile = false
 			m.fileContent = ""
 			m.viewingFilePath = ""
+			m.fileCursor = 0
+			m.fileLastKey = ""
 			return m, nil
 		}
 		// If in a directory, go up
@@ -1745,6 +1761,10 @@ func (m *MainScreen) handleContentNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						m.fileContent = content
 						m.viewingFile = true
 						m.viewingFilePath = entry.Path
+						m.fileViewReady = false
+						m.fileCursor = 0
+						m.fileLastKey = ""
+						m.fileVisualMode = false
 					}
 					return m, nil
 				}
@@ -1785,9 +1805,19 @@ func (m *MainScreen) handleContentNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 
 	case key.Matches(msg, m.keymap.Down):
-		// If viewing file, scroll down
+		// If viewing file, move cursor down
 		if m.viewingFile {
-			m.fileViewport.ScrollDown(1)
+			maxLine := strings.Count(m.fileContent, "\n")
+			if m.fileCursor < maxLine {
+				m.fileCursor++
+				if m.fileVisualMode {
+					m.fileVisualEnd = m.fileCursor
+				}
+			}
+			// Keep cursor in view
+			if m.fileCursor > m.fileViewport.YOffset+m.fileViewport.Height-1 {
+				m.fileViewport.ScrollDown(1)
+			}
 			return m, nil
 		}
 		maxItems := m.getContentCount()
@@ -1800,9 +1830,18 @@ func (m *MainScreen) handleContentNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.adjustScrollOffset()
 		}
 	case key.Matches(msg, m.keymap.Up):
-		// If viewing file, scroll up
+		// If viewing file, move cursor up
 		if m.viewingFile {
-			m.fileViewport.ScrollUp(1)
+			if m.fileCursor > 0 {
+				m.fileCursor--
+				if m.fileVisualMode {
+					m.fileVisualEnd = m.fileCursor
+				}
+			}
+			// Keep cursor in view
+			if m.fileCursor < m.fileViewport.YOffset {
+				m.fileViewport.ScrollUp(1)
+			}
 			return m, nil
 		}
 		if m.selectedContent > 0 {
@@ -1815,17 +1854,103 @@ func (m *MainScreen) handleContentNav(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	// Additional scroll keys when viewing file
+	// Additional keys when viewing file (visual mode, yank, navigation)
 	if m.viewingFile {
+		maxLine := strings.Count(m.fileContent, "\n")
 		switch msg.String() {
 		case "ctrl+d":
+			m.fileCursor += m.fileViewport.Height / 2
+			if m.fileCursor > maxLine {
+				m.fileCursor = maxLine
+			}
+			if m.fileVisualMode {
+				m.fileVisualEnd = m.fileCursor
+			}
 			m.fileViewport.HalfPageDown()
 		case "ctrl+u":
+			m.fileCursor -= m.fileViewport.Height / 2
+			if m.fileCursor < 0 {
+				m.fileCursor = 0
+			}
+			if m.fileVisualMode {
+				m.fileVisualEnd = m.fileCursor
+			}
 			m.fileViewport.HalfPageUp()
 		case "g":
-			m.fileViewport.GotoTop()
+			if m.fileLastKey == "g" {
+				// gg - go to top
+				m.fileViewport.GotoTop()
+				m.fileCursor = 0
+				if m.fileVisualMode {
+					m.fileVisualEnd = m.fileCursor
+				}
+				m.fileLastKey = "gg"
+				return m, nil
+			}
+			m.fileLastKey = "g"
+			return m, nil
 		case "G":
 			m.fileViewport.GotoBottom()
+			m.fileCursor = maxLine
+			if m.fileVisualMode {
+				m.fileVisualEnd = m.fileCursor
+			}
+		case "V":
+			// Toggle visual line mode
+			if m.fileVisualMode {
+				m.fileVisualMode = false
+			} else {
+				m.fileVisualMode = true
+				m.fileVisualStart = m.fileCursor
+				m.fileVisualEnd = m.fileCursor
+			}
+		case "y":
+			if m.fileContent == "" {
+				m.fileLastKey = ""
+				return m, nil
+			}
+			lines := strings.Split(m.fileContent, "\n")
+			if m.fileVisualMode {
+				// Copy selected lines
+				startLine := m.fileVisualStart
+				endLine := m.fileVisualEnd
+				if startLine > endLine {
+					startLine, endLine = endLine, startLine
+				}
+				if startLine < 0 {
+					startLine = 0
+				}
+				if endLine >= len(lines) {
+					endLine = len(lines) - 1
+				}
+				selected := strings.Join(lines[startLine:endLine+1], "\n")
+				if err := copyToClipboard(selected); err != nil {
+					m.statusMsg = "Copy failed: " + err.Error()
+				} else {
+					m.statusMsg = fmt.Sprintf("Copied %d lines!", endLine-startLine+1)
+				}
+				m.fileVisualMode = false
+			} else if m.fileLastKey == "gg" {
+				// ggy - yank entire file
+				if err := copyToClipboard(m.fileContent); err != nil {
+					m.statusMsg = "Copy failed: " + err.Error()
+				} else {
+					m.statusMsg = fmt.Sprintf("Yanked all %d lines!", len(lines))
+				}
+			} else if m.fileLastKey == "y" {
+				// yy - yank current line
+				if m.fileCursor >= 0 && m.fileCursor < len(lines) {
+					if err := copyToClipboard(lines[m.fileCursor]); err != nil {
+						m.statusMsg = "Copy failed: " + err.Error()
+					} else {
+						m.statusMsg = "Yanked line!"
+					}
+				}
+			} else {
+				m.fileLastKey = "y"
+				return m, nil
+			}
+			m.fileLastKey = ""
 		}
 	}
 
@@ -2025,6 +2150,9 @@ func (m *MainScreen) handleBranchPopup(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.currentPath = nil
 			m.fileContent = ""
 			m.viewingFile = false
+			m.fileCursor = 0
+			m.fileLastKey = ""
+			m.fileVisualMode = false
 			m.readmeContent = ""
 			m.loading = true
 			m.loadingMsg = "Loading files..."
@@ -2597,7 +2725,7 @@ func (m *MainScreen) renderListSection(width, height int) string {
 			if m.viewingFile && m.fileContent != "" {
 				// Show file path
 				content.WriteString(styles.DimmedText.Render(m.viewingFilePath) + "\n")
-				content.WriteString(styles.DimmedText.Render("Esc: back | j/k: scroll | g/G: top/bottom") + "\n\n")
+				content.WriteString(styles.DimmedText.Render("j/k: nav | V: select | yy: yank | ggy: all | Esc: back") + "\n\n")
 
 				// Use viewport for file content
 				fileViewHeight := visibleLines - 3
@@ -2609,11 +2737,50 @@ func (m *MainScreen) renderListSection(width, height int) string {
 					m.fileViewport.SetContent(highlighted)
 					m.fileViewReady = true
 				}
-				content.WriteString(m.fileViewport.View())
 
-				// Scroll indicator
+				// Apply cursor and visual selection highlighting
+				viewContent := m.fileViewport.View()
+				fileLines := strings.Split(viewContent, "\n")
+
+				// Calculate visual selection range
+				selStart := m.fileVisualStart
+				selEnd := m.fileVisualEnd
+				if selStart > selEnd {
+					selStart, selEnd = selEnd, selStart
+				}
+
+				for i, line := range fileLines {
+					viewportLine := m.fileViewport.YOffset + i
+
+					// Highlight visual selection
+					if m.fileVisualMode && viewportLine >= selStart && viewportLine <= selEnd {
+						line = lipgloss.NewStyle().Background(lipgloss.Color("238")).Render(line)
+					} else if viewportLine == m.fileCursor {
+						// Show cursor line when not in visual mode
+						line = lipgloss.NewStyle().Reverse(true).Render(line)
+					}
+					fileLines[i] = line
+				}
+				content.WriteString(strings.Join(fileLines, "\n"))
+
+				// Status line with scroll indicator and visual mode status
+				var statusParts []string
 				if m.fileViewport.TotalLineCount() > fileViewHeight {
-					content.WriteString(styles.DimmedText.Render(fmt.Sprintf("\n[%d%%]", int(m.fileViewport.ScrollPercent()*100))))
+					statusParts = append(statusParts, fmt.Sprintf("[%d%%]", int(m.fileViewport.ScrollPercent()*100)))
+				}
+				if m.fileVisualMode {
+					lineCount := m.fileVisualEnd - m.fileVisualStart
+					if lineCount < 0 {
+						lineCount = -lineCount
+					}
+					lineCount++
+					statusParts = append(statusParts, fmt.Sprintf("VISUAL(%d)", lineCount))
+				}
+				if m.statusMsg != "" {
+					statusParts = append(statusParts, m.statusMsg)
+				}
+				if len(statusParts) > 0 {
+					content.WriteString(styles.DimmedText.Render("\n" + strings.Join(statusParts, " ")))
 				}
 			} else {
 				// Show file list
